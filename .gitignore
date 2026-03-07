@@ -1,23 +1,56 @@
+# Environment
 .env
 .env.*
-.venv/
-venv/
+!.env.example
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.so
+.python-version
+.venv/
+venv/
+
+# Logs
 *.log
-*.sqlite3
-*.db
-node_modules/
+
+# Editors
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
 dist/
 build/
 coverage/
+htmlcov/
+
+# Node
+node_modules/
+
+# Local databases / misc
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary / backup files
 *.bak
-*.swp
-.DS_Store
-Thumbs.db
-backend/www/assets/*
-!backend/www/assets/.gitkeep
+*.tmp
+*.orig
+*.rej
+
+# Project screenshot placeholders
 docs/screenshots/*
 !docs/screenshots/.gitkeep
+
+# Frontend assets placeholder
+backend/www/assets/*
+!backend/www/assets/.gitkeep
