@@ -72,6 +72,20 @@ GET /api/v1/meta/imdb/suggest?q=edge
 
 Returns title suggestions grouped by IMDb ID.
 
+Important:
+
+This endpoint depends on the helper table:
+
+suggest_titles
+
+This table is not part of the original subtitle dump.
+
+It must be created once using:
+
+examples/create_suggest_titles.sql
+
+If the table is missing, the endpoint returns a clear error message telling the user how to create it.
+
 --------------------------------------------------
 
 OMDB PROXY

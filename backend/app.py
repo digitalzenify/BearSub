@@ -229,7 +229,7 @@ def _imdb_suggest_impl(q: str, limit: int, x_api_key: Optional[str]):
         return {"count": 0, "results": []}
 
     limit = max(1, min(int(limit or 20), 50))
-    like = f"{q}%"
+    like = f"%{q}%"
 
     sql = """
         SELECT imdb, title, cnt
@@ -245,6 +245,16 @@ def _imdb_suggest_impl(q: str, limit: int, x_api_key: Optional[str]):
                 cur.execute(sql, (like, limit))
                 rows = cur.fetchall()
     except Exception as e:
+        msg = str(e).lower()
+        if "suggest_titles" in msg and ("doesn't exist" in msg or "does not exist" in msg or "1146" in msg):
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Missing helper table 'suggest_titles'. "
+                    "Please create it once using examples/create_suggest_titles.sql. "
+                    "This table is required for fast frontend IMDb/title suggestions."
+                )
+            )
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     out = []

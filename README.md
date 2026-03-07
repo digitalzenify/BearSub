@@ -87,3 +87,26 @@ Long live open-source projects.
 ## License
 
 MIT
+
+## Database Requirement for Fast Title Suggestions
+
+SubsDump uses a helper table named `suggest_titles` for very fast IMDb/title suggestions in the frontend.
+
+Why this exists:
+
+- the original subtitle dump is large
+- the dump is effectively static
+- frontend autocomplete should be fast
+- repeatedly grouping and counting rows from `all_subs` is slower than querying a prebuilt helper table
+
+Important:
+
+- this table is not part of the original dump
+- it must be created once after importing the subtitle database
+- the current `_imdb_suggest_impl` expects this table to exist
+
+SQL file:
+
+- `examples/create_suggest_titles.sql`
+
+After importing your original dump, run that SQL file once to build the helper table.
