@@ -1,0 +1,7 @@
+general:
+  enabled_providers:
+    - subsdump
+
+subsdump:
+  api_url: https://subs.d3lphi3r.com
+  api_key: changeme

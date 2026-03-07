@@ -1,0 +1,14 @@
+[Unit]
+Description=SubsDump Backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/SubsDump/backend
+EnvironmentFile=/opt/SubsDump/.env
+ExecStart=/usr/bin/env uvicorn app:APP --host 127.0.0.1 --port 9010
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

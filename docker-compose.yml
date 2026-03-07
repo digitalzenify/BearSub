@@ -1,0 +1,11 @@
+services:
+  subsdump-backend:
+    build: ./backend
+    container_name: subsdump-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:9010:9010"
+    volumes:
+      - ./backend:/app

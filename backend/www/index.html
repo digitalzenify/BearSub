@@ -1,0 +1,1007 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SubsDump</title>
+  <meta name="color-scheme" content="dark light" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root { --glass: rgba(255,255,255,.06); --stroke: rgba(255,255,255,.10); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    body{
+      background:
+        radial-gradient(900px 450px at 15% 10%, rgba(99,102,241,.18), transparent 60%),
+        radial-gradient(900px 450px at 85% 15%, rgba(16,185,129,.14), transparent 60%),
+        radial-gradient(900px 450px at 60% 90%, rgba(236,72,153,.10), transparent 60%),
+        #020617;
+    }
+
+    .bg-wrap{ position: fixed; inset:0; z-index:-1; overflow:hidden; }
+    .bg-poster{
+      position:absolute; inset:-40px;
+      background-size: cover;
+      background-position: center;
+      transform: scale(1.08);
+      filter: blur(38px) saturate(1.12) contrast(1.06);
+      opacity:.38;
+    }
+    .bg-tint{
+      position:absolute; inset:0;
+      background:
+        radial-gradient(1200px 700px at 20% 20%, rgba(99,102,241,.18), transparent 60%),
+        radial-gradient(1200px 700px at 80% 20%, rgba(16,185,129,.12), transparent 60%),
+        radial-gradient(900px 650px at 50% 45%, rgba(255,255,255,.05), transparent 55%),
+        radial-gradient(1400px 900px at 50% 40%, transparent 55%, rgba(2,6,23,.70) 78%, rgba(2,6,23,.92) 100%),
+        linear-gradient(180deg, rgba(2,6,23,.30), rgba(2,6,23,.86) 72%, rgba(2,6,23,.97));
+    }
+
+    .glass{
+      background: rgba(255,255,255,.06);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,.10);
+    }
+    .shadow-soft{ box-shadow: 0 24px 90px rgba(0,0,0,.55); }
+    .ring-soft{ box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset; }
+
+    .input{
+      background: rgba(2,6,23,.55);
+      border: 1px solid rgba(255,255,255,.12);
+      outline: none;
+    }
+    .input:focus{ box-shadow: 0 0 0 2px rgba(255,255,255,.10); }
+
+    .btn{ border:1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.06); }
+    .btn:hover{ background: rgba(255,255,255,.10); }
+    .btn-primary{ border:1px solid rgba(99,102,241,.35); background: rgba(99,102,241,.16); }
+    .btn-primary:hover{ background: rgba(99,102,241,.22); }
+    .btn-emerald{ border:1px solid rgba(16,185,129,.30); background: rgba(16,185,129,.14); }
+    .btn-emerald:hover{ background: rgba(16,185,129,.20); }
+
+    .chip{ border:1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.05); }
+
+    .zpop{ z-index: 1000; }
+
+    .card-actions{
+      opacity: 0;
+      transition: opacity .18s ease;
+    }
+    .card:hover .card-actions{
+      opacity: 1;
+    }
+
+    .line-clamp-2{
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .line-clamp-3{
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .release-preview{
+      max-height: 4.5rem;
+      overflow: hidden;
+    }
+
+    .release-line{
+      display:block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    a.subtle-link:hover{
+      color: rgb(165 180 252);
+    }
+  </style>
+</head>
+
+<body class="text-slate-100">
+  <div class="bg-wrap">
+    <div id="pagePoster" class="bg-poster" style="background-image:none;"></div>
+    <div class="bg-tint"></div>
+  </div>
+
+  <div class="max-w-7xl mx-auto px-4 py-8 sm:py-10">
+
+    <header class="flex flex-col gap-4">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="px-2 py-1 rounded-full chip text-xs mono truncate">subs.d3lphi3r.com</span>
+          <span id="cfgPill" class="text-xs text-slate-400 truncate">…</span>
+        </div>
+
+        <div id="keyBox" class="hidden w-[22rem]">
+          <div class="glass rounded-2xl p-3 shadow-soft">
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-xs text-slate-300">X-API-Key</div>
+              <button id="saveKey" class="btn px-3 py-1.5 rounded-xl text-xs">Save</button>
+            </div>
+            <input id="apiKey" class="input w-full mt-2 px-3 py-2 rounded-xl mono text-xs" placeholder="Paste X-API-Key" />
+          </div>
+        </div>
+      </div>
+
+      <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+        <div class="min-w-0">
+          <h1 class="text-3xl sm:text-5xl font-bold tracking-tight">SubsDump</h1>
+          <p class="mt-2 text-slate-300 text-sm sm:text-base">
+            SubsDump — Subscene Archive Explorer
+          </p>
+        </div>
+        <div class="flex items-center gap-2 text-xs text-slate-400">
+          <span id="langStatus">Languages: —</span>
+          <span class="text-slate-600">•</span>
+          <span id="status">Ready</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <section class="lg:col-span-12 glass rounded-3xl shadow-soft overflow-visible relative z-20">
+        <div class="p-5 sm:p-6">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div class="min-w-0">
+              <div class="group flex items-center gap-2 min-w-0">
+                <a id="movieTitleLink" href="/" class="subtle-link min-w-0 block">
+                  <div id="movieTitle" class="text-xl sm:text-2xl font-semibold truncate">—</div>
+                </a>
+                <span id="movieTT" class="hidden px-2 py-1 rounded-full chip text-[11px] mono">—</span>
+                <button id="movieCopyBtn"
+                        class="btn px-2 py-1 rounded-lg text-[11px] opacity-0 transition group-hover:opacity-100 hidden"
+                        data-copy="/">
+                  🔗 Copy link
+                </button>
+              </div>
+              <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-300/75">
+                <span id="movieMeta" class="truncate">No movie selected</span>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <button id="doBest" class="btn-primary px-4 py-2 rounded-xl text-sm">Best Match</button>
+              <button id="clearAll" class="btn px-4 py-2 rounded-xl text-sm">Reset</button>
+            </div>
+          </div>
+
+          <div id="movieDetails" class="mt-3 text-sm text-slate-200/85 leading-relaxed line-clamp-2">—</div>
+
+          <div class="mt-5 grid grid-cols-1 lg:grid-cols-12 gap-3">
+            <div class="lg:col-span-6 relative">
+              <label class="text-xs text-slate-300/80">Movie title</label>
+              <input id="movieQ" class="input w-full mt-1 px-3 py-2 rounded-xl" placeholder="Type a movie name…" autocomplete="off" />
+              <div id="movieSuggest" class="hidden absolute zpop mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/95 glass shadow-soft overflow-hidden">
+                <div id="movieSuggestList" class="max-h-80 overflow-auto p-1"></div>
+              </div>
+            </div>
+
+            <div class="lg:col-span-3">
+              <label class="text-xs text-slate-300/80">IMDb</label>
+              <input id="imdb" class="input w-full mt-1 px-3 py-2 rounded-xl mono" placeholder="tt1631867" />
+            </div>
+
+            <div class="lg:col-span-3">
+              <label class="text-xs text-slate-300/80">Language</label>
+              <div id="langMount" class="mt-1"></div>
+            </div>
+
+            <div class="lg:col-span-12">
+              <label class="text-xs text-slate-300/80">Query (optional)</label>
+              <input id="q" class="input w-full mt-1 px-3 py-2 rounded-xl" placeholder="Release tags, codec, source… (e.g., REMUX DV HDR HEVC)" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="lg:col-span-12 glass rounded-3xl shadow-soft overflow-hidden relative z-0">
+        <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
+          <div class="flex items-baseline gap-3 min-w-0">
+            <div class="text-lg font-semibold">Results</div>
+            <div id="resultStatus" class="text-xs text-slate-400 truncate">No search yet</div>
+          </div>
+          <span class="px-2 py-1 rounded-full chip text-xs" id="countPill">0</span>
+        </div>
+
+        <div class="p-4 sm:p-6">
+          <div id="bestBox" class="hidden rounded-2xl border border-white/10 bg-white/5 p-4 ring-soft">
+            <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+              <div class="min-w-0">
+                <div class="text-xs text-slate-400">Best Match</div>
+                <div class="text-xl font-semibold mt-1" id="bestTitle">—</div>
+                <div class="text-xs text-slate-500 mt-2 mono" id="bestMeta">—</div>
+                <div class="text-sm text-slate-300 mt-3" id="bestComment"></div>
+              </div>
+              <button id="bestDownloadBtn" class="btn-emerald px-3 py-1.5 rounded-lg text-xs whitespace-nowrap">Download</button>
+            </div>
+            <div class="mt-3">
+              <pre id="bestReleases" class="text-xs bg-slate-900/60 border border-white/10 rounded-2xl p-3 overflow-auto"></pre>
+            </div>
+          </div>
+
+          <div id="empty" class="mt-2 rounded-2xl border border-white/10 bg-white/5 p-6 ring-soft">
+            <div class="text-slate-200 font-semibold">No results</div>
+            <div class="text-sm text-slate-500 mt-2">Select a suggestion or paste an IMDb ID to begin.</div>
+          </div>
+
+          <div id="grid" class="hidden mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="mt-14 pb-8 text-center text-xs text-slate-500">
+      <div class="flex flex-col items-center gap-2">
+        <div class="flex items-center gap-2">
+          <a href="https://github.com/D3lphi3r/SubsDump"
+             target="_blank"
+             rel="noreferrer"
+             class="text-slate-300 hover:text-indigo-300 transition font-medium">
+            SubsDump
+          </a>
+          <span class="text-[10px] text-slate-600">v1.0</span>
+        </div>
+
+        <div>
+          Built by
+          <a href="https://github.com/D3lphi3r/"
+             target="_blank"
+             rel="noreferrer"
+             class="text-slate-300 hover:text-indigo-300 transition font-medium">
+            D3lphi3r
+          </a>
+        </div>
+
+        <div class="text-slate-500">
+          Special thanks to whoever provided the Subscene dump used in this project.
+        </div>
+
+        <div class="italic text-slate-600">
+          Long live open-source projects.
+        </div>
+      </div>
+    </footer>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const status = (t) => $("status").textContent = t;
+  const resultStatus = (t) => $("resultStatus").textContent = t;
+  const langStatus = (t) => $("langStatus").textContent = t;
+
+  let hasInteracted = false;
+
+  function getKey(){ return localStorage.getItem("subs_api_key") || ""; }
+  function setKey(v){ localStorage.setItem("subs_api_key", v || ""); }
+  let forceEnterKeys = false;
+
+  function headers(){
+    if (!forceEnterKeys) return {};
+    const k = getKey();
+    return k ? { "X-API-Key": k } : {};
+  }
+
+  function esc(s){
+    return (s ?? "").toString().replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  async function apiGet(path, params){
+    const url = new URL(path, window.location.origin);
+    Object.entries(params || {}).forEach(([k,v]) => {
+      if (v !== undefined && v !== null && String(v).trim() !== "") url.searchParams.set(k, v);
+    });
+    const res = await fetch(url.toString(), { headers: headers() });
+    const txt = await res.text();
+    let data;
+    try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
+    if (!res.ok){
+      const msg = (data && (data.detail || data.message)) ? (data.detail || data.message) : ("HTTP " + res.status);
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  async function loadConfig(){
+    try{
+      const cfg = await apiGet("/api/v1/meta/config", {});
+      forceEnterKeys = !!cfg.force_enter_keys;
+      $("cfgPill").textContent = forceEnterKeys ? "Key required" : "Key injected (server)";
+      if (forceEnterKeys){
+        $("keyBox").classList.remove("hidden");
+        $("apiKey").value = getKey();
+        $("saveKey").onclick = async () => {
+          setKey($("apiKey").value.trim());
+          hasInteracted = true;
+          status("Key saved");
+          await loadLanguages();
+        };
+      } else {
+        $("keyBox").classList.add("hidden");
+      }
+    }catch(e){
+      forceEnterKeys = false;
+      $("cfgPill").textContent = "Key injected (server)";
+      $("keyBox").classList.add("hidden");
+    }
+  }
+
+  function getFilenameFromDisposition(disposition){
+    if (!disposition) return null;
+    const m = /filename\*=UTF-8''([^;]+)|filename="([^"]+)"|filename=([^;]+)/i.exec(disposition);
+    const raw = (m && (m[1] || m[2] || m[3])) ? (m[1] || m[2] || m[3]) : null;
+    if (!raw) return null;
+    try { return decodeURIComponent(raw.replace(/(^['"]|['"]$)/g, "").trim()); }
+    catch { return raw.replace(/(^['"]|['"]$)/g, "").trim(); }
+  }
+
+  async function download(path, fallbackName){
+    status("Downloading…");
+    try{
+      const url = new URL(path, window.location.origin);
+      const res = await fetch(url.toString(), { headers: headers() });
+      if (!res.ok){
+        const txt = await res.text();
+        let msg = "Download failed";
+        try { const j = JSON.parse(txt); msg = j.detail || msg; } catch {}
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const disp = res.headers.get("content-disposition");
+      const filename = getFilenameFromDisposition(disp) || fallbackName || "subtitle.zip";
+      const a = document.createElement("a");
+      const objUrl = URL.createObjectURL(blob);
+      a.href = objUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objUrl);
+      status("Download started");
+    }catch(e){
+      status("Error");
+    }
+  }
+
+  async function copyText(text){
+    try{
+      await navigator.clipboard.writeText(text);
+      status("Link copied");
+    }catch(e){
+      status("Copy failed");
+    }
+  }
+
+  function currentMovieRoute(){
+    const imdb = normalizeImdbInput($("imdb").value.trim());
+    if (!imdb || !imdb.startsWith("tt")) return "/";
+    const lang = (langDD && typeof langDD.getValue === "function") ? langDD.getValue() : "";
+    let path = `/movie/${imdb}`;
+    if (lang) path += `/${encodeURIComponent(lang)}`;
+    return path;
+  }
+
+  function updateTopMovieRoute(){
+    const titleEl = $("movieTitle");
+    const linkEl = $("movieTitleLink");
+    const copyBtn = $("movieCopyBtn");
+
+    const hasMovie = titleEl && titleEl.textContent && titleEl.textContent.trim() !== "—";
+    const route = currentMovieRoute();
+
+    if (!hasMovie || route === "/"){
+      if (linkEl) linkEl.setAttribute("href", "/");
+      if (copyBtn){
+        copyBtn.dataset.copy = "/";
+        copyBtn.classList.add("hidden");
+      }
+      return;
+    }
+
+    if (linkEl) linkEl.setAttribute("href", route);
+    if (copyBtn){
+      copyBtn.dataset.copy = route;
+      copyBtn.classList.remove("hidden");
+    }
+  }
+
+  function syncBrowserUrl(){
+    const route = currentMovieRoute();
+    if (!route || route === "/") return;
+    if (window.location.pathname !== route){
+      history.replaceState({}, "", route);
+    }
+  }
+
+  $("movieCopyBtn")?.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const path = $("movieCopyBtn").dataset.copy || "/";
+    const full = window.location.origin + path;
+    await copyText(full);
+  });
+
+  const FLAG = {
+    "english":"🇬🇧","arabic":"🇸🇦","french":"🇫🇷","spanish":"🇪🇸","italian":"🇮🇹","german":"🇩🇪",
+    "portuguese":"🇵🇹","brazillian-portuguese":"🇧🇷","russian":"🇷🇺","japanese":"🇯🇵","korean":"🇰🇷",
+    "turkish":"🇹🇷","dutch":"🇳🇱","swedish":"🇸🇪","norwegian":"🇳🇴","danish":"🇩🇰","finnish":"🇫🇮",
+    "polish":"🇵🇱","czech":"🇨🇿","greek":"🇬🇷","hebrew":"🇮🇱","thai":"🇹🇭","vietnamese":"🇻🇳",
+    "indonesian":"🇮🇩","malay":"🇲🇾","hindi":"🇮🇳","urdu":"🇵🇰","bengali":"🇧🇩","nepali":"🇳🇵",
+    "farsi_persian":"🇮🇷","ukranian":"🇺🇦","belarusian":"🇧🇾","armenian":"🇦🇲","georgian":"🇬🇪"
+  };
+  function titleCaseFromSlug(slug){
+    return (slug || "").replace(/[_-]+/g, " ").trim().split(/\s+/).filter(Boolean)
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+  }
+  function langLabel(slug){
+    const pretty = {
+      "brazillian-portuguese":"Brazilian Portuguese",
+      "chinese-bg-code":"Chinese (GB)",
+      "big_5_code":"Chinese (Big5)",
+      "farsi_persian":"Farsi Persian",
+      "ukranian":"Ukrainian",
+    };
+    return pretty[slug] || titleCaseFromSlug(slug);
+  }
+  function langFlag(slug){ return FLAG[slug] || "🌐"; }
+
+  function createLangDropdown(mountEl){
+    const wrap = document.createElement("div");
+    wrap.className = "relative";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl input hover:bg-slate-900/70";
+    btn.innerHTML = `
+      <div class="flex items-center gap-2 min-w-0">
+        <span class="text-base" data-flag>🌐</span>
+        <span class="truncate text-slate-200 text-sm" data-text>All</span>
+      </div>
+      <span class="text-slate-400 text-xs">▾</span>
+    `;
+
+    const panel = document.createElement("div");
+    panel.className = "hidden absolute zpop mt-2 w-full rounded-2xl border border-white/10 bg-slate-950/95 glass shadow-soft overflow-hidden";
+    panel.innerHTML = `
+      <div class="p-2 border-b border-white/10">
+        <input data-search class="input w-full px-3 py-2 rounded-xl text-sm" placeholder="Search…" />
+      </div>
+      <div data-list class="max-h-80 overflow-auto p-1"></div>
+    `;
+
+    wrap.appendChild(btn);
+    wrap.appendChild(panel);
+    mountEl.innerHTML = "";
+    mountEl.appendChild(wrap);
+
+    const elFlag = btn.querySelector("[data-flag]");
+    const elText = btn.querySelector("[data-text]");
+    const elSearch = panel.querySelector("[data-search]");
+    const elList = panel.querySelector("[data-list]");
+
+    const state = { open:false, value:"", items:[], filtered:[] };
+
+    function setOpen(v){
+      state.open = v;
+      panel.classList.toggle("hidden", !v);
+      if (v){
+        elSearch.value = "";
+        filter("");
+        setTimeout(() => elSearch.focus(), 0);
+      }
+    }
+    function setValue(v, silent=false){
+      state.value = v || "";
+      if (!state.value){
+        elFlag.textContent = "🌐";
+        elText.textContent = "All";
+      } else {
+        const it = state.items.find(x => x.lang === state.value);
+        elFlag.textContent = it ? it.flag : "🌐";
+        elText.textContent = it ? it.label : state.value;
+      }
+      if (!silent && hasInteracted) runSearchDebounced();
+    }
+    function filter(q){
+      const s = (q || "").trim().toLowerCase();
+      state.filtered = !s ? state.items : state.items.filter(it =>
+        it.lang.toLowerCase().includes(s) || it.label.toLowerCase().includes(s)
+      );
+      renderList();
+    }
+    function renderList(){
+      elList.innerHTML = "";
+
+      const allRow = document.createElement("button");
+      allRow.type = "button";
+      allRow.className = "w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 flex items-center justify-between gap-2";
+      allRow.innerHTML = `<div class="flex items-center gap-2 min-w-0"><span class="text-base">🌐</span><span class="truncate text-slate-200 text-sm">All</span></div>`;
+      allRow.onclick = () => { hasInteracted = true; setValue(""); setOpen(false); };
+      elList.appendChild(allRow);
+
+      for (const it of state.filtered){
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 flex items-center justify-between gap-2";
+        row.innerHTML = `
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="text-base">${it.flag}</span>
+            <span class="truncate text-slate-200 text-sm">${esc(it.label)}</span>
+          </div>
+          <span class="text-[11px] text-slate-500 mono">${it.count.toLocaleString()}</span>
+        `;
+        row.onclick = () => { hasInteracted = true; setValue(it.lang); setOpen(false); };
+        elList.appendChild(row);
+      }
+    }
+
+    btn.onclick = () => setOpen(!state.open);
+    elSearch.addEventListener("input", () => filter(elSearch.value));
+    document.addEventListener("click", (e) => { if (!wrap.contains(e.target)) setOpen(false); });
+
+    return {
+      setItems(items){ state.items = items || []; state.filtered = state.items; renderList(); },
+      getValue(){ return state.value; },
+      setValue(v, silent=false){ setValue(v, silent); },
+      clear(){ state.value=""; elFlag.textContent="🌐"; elText.textContent="All"; }
+    };
+  }
+
+  const langDD = createLangDropdown($("langMount"));
+
+  async function loadLanguages(){
+    try{
+      langStatus("Languages: loading…");
+      const data = await apiGet("/api/v1/meta/languages", {});
+      const raw = data.results || [];
+      const items = raw.map(r => ({
+        lang: r.lang,
+        count: Number(r.count || 0),
+        label: langLabel(r.lang),
+        flag: langFlag(r.lang),
+      }));
+      items.sort((a,b) => a.label.localeCompare(b.label, "en", { sensitivity:"base" }));
+      langDD.setItems(items);
+      langStatus(`Languages: ${items.length}`);
+    }catch(e){
+      langStatus("Languages: failed");
+    }
+  }
+
+  function normalizeImdbInput(v){
+    const s = (v || "").trim();
+    if (!s) return "";
+    if (s.startsWith("tt")) return s;
+    if (/^\d+$/.test(s)) return "tt" + s.padStart(7, "0");
+    return s;
+  }
+
+  function setPoster(url){
+    const p = $("pagePoster");
+    if (!url || url === "N/A"){ p.style.backgroundImage = "none"; return; }
+    const safe = url.replace(/"/g, "&quot;");
+    p.style.backgroundImage = `url("${safe}")`;
+  }
+
+  function setPreviewEmpty(){
+    $("movieTitle").textContent = "—";
+    $("movieMeta").textContent = "No movie selected";
+    $("movieDetails").textContent = "—";
+    $("movieTT").classList.add("hidden");
+    $("movieTT").textContent = "";
+    setPoster("");
+    updateTopMovieRoute();
+  }
+
+  async function updatePreviewFromImdb(tt){
+    const imdbTT = normalizeImdbInput(tt);
+    if (!imdbTT || !imdbTT.startsWith("tt")) { setPreviewEmpty(); return; }
+
+    $("movieMeta").textContent = "Loading…";
+    $("movieTitle").textContent = "—";
+    $("movieDetails").textContent = "—";
+    $("movieTT").classList.remove("hidden");
+    $("movieTT").textContent = imdbTT;
+
+    try{
+      const data = await apiGet("/api/v1/meta/omdb", { i: imdbTT });
+      const title = data.Title || "—";
+      const year = data.Year || "";
+      const runtime = data.Runtime || "";
+      const rated = data.Rated || "";
+      const imdbRating = data.imdbRating || "";
+      const plot = data.Plot || "";
+      const poster = data.Poster || "";
+
+      $("movieTitle").textContent = title;
+      $("movieMeta").textContent = [year, runtime, rated].filter(Boolean).join(" • ") || "—";
+      $("movieDetails").textContent = [("IMDb " + imdbRating).trim(), plot].filter(Boolean).join(" — ") || "—";
+      setPoster(poster);
+      updateTopMovieRoute();
+    }catch(e){
+      $("movieMeta").textContent = "Preview unavailable";
+      setPoster("");
+    }
+  }
+
+  async function suggestFromDb(q){
+    if (!q || q.trim().length < 2) return [];
+    const data = await apiGet("/api/v1/meta/imdb/suggest", { q: q.trim(), limit: 18 });
+    return data.results || [];
+  }
+
+  let suggestTimer = null;
+  function showSuggest(v){ $("movieSuggest").classList.toggle("hidden", !v); }
+
+  function renderMovieSuggest(items){
+    const list = $("movieSuggestList");
+    list.innerHTML = "";
+
+    if (!items.length){
+      const row = document.createElement("div");
+      row.className = "px-3 py-3 text-sm text-slate-400";
+      row.textContent = "No suggestions.";
+      list.appendChild(row);
+      return;
+    }
+
+    for (const it of items){
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "w-full text-left px-3 py-2 rounded-xl hover:bg-white/5 flex items-center justify-between gap-3";
+      btn.innerHTML = `
+        <div class="min-w-0">
+          <div class="truncate font-semibold text-slate-200">${esc(it.title || "—")}</div>
+          <div class="text-[11px] text-slate-500 mono">${esc(it.imdb_tt)} • ${Number(it.count||0).toLocaleString()}</div>
+        </div>
+        <span class="text-slate-400">↵</span>
+      `;
+      btn.onclick = async () => {
+        hasInteracted = true;
+        $("imdb").value = it.imdb_tt;
+        $("movieQ").value = it.title || "";
+        showSuggest(false);
+        runSearchDebounced(true);
+        updatePreviewFromImdb(it.imdb_tt);
+      };
+      list.appendChild(btn);
+    }
+  }
+
+  $("movieQ").addEventListener("input", () => {
+    const q = $("movieQ").value;
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(async () => {
+      try{
+        if (!q || q.trim().length < 2){ showSuggest(false); return; }
+        const items = await suggestFromDb(q);
+        renderMovieSuggest(items);
+        showSuggest(true);
+      }catch(e){
+        showSuggest(false);
+      }
+    }, 180);
+  });
+
+  document.addEventListener("click", (e) => {
+    const box = $("movieSuggest");
+    if (!box || box.classList.contains("hidden")) return;
+    const container = $("movieQ").parentElement;
+    if (container && !container.contains(e.target)) showSuggest(false);
+  });
+
+  let searchTimer = null;
+  async function runSearchDebounced(immediate=false){
+    if (!hasInteracted) return;
+    clearTimeout(searchTimer);
+    const delay = immediate ? 0 : 260;
+    searchTimer = setTimeout(async () => { await runSearch(); }, delay);
+  }
+
+  function showEmpty(){
+    $("grid").classList.add("hidden");
+    $("empty").classList.remove("hidden");
+    $("countPill").textContent = "0";
+    resultStatus("No search yet");
+  }
+
+  function showGrid(){
+    $("empty").classList.add("hidden");
+    $("grid").classList.remove("hidden");
+  }
+
+  async function runSearch(){
+    try{
+      resultStatus("Searching…");
+      $("bestBox").classList.add("hidden");
+
+      const imdb = normalizeImdbInput($("imdb").value.trim());
+      const lang = langDD.getValue();
+      const q = $("q").value.trim();
+
+      const data = await apiGet("/api/v1/subtitles/search", { imdb, lang, q, limit: 60 });
+      renderCards(data.results || []);
+      $("countPill").textContent = String(data.count || 0);
+      resultStatus(`${data.count || 0} results`);
+      updateTopMovieRoute();
+      syncBrowserUrl();
+      status("Done");
+    }catch(e){
+      renderCards([]);
+      $("countPill").textContent = "0";
+      resultStatus("Failed");
+      status("Error");
+    }
+  }
+
+  $("imdb").addEventListener("input", () => { hasInteracted = true; runSearchDebounced(); });
+  $("q").addEventListener("input", () => { hasInteracted = true; runSearchDebounced(); });
+
+  let previewTimer = null;
+  $("imdb").addEventListener("input", () => {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      if (!hasInteracted) return;
+      const imdb = $("imdb").value.trim();
+      if (imdb) updatePreviewFromImdb(imdb);
+      else setPreviewEmpty();
+    }, 320);
+  });
+
+  function renderCards(list){
+    const grid = $("grid");
+    grid.innerHTML = "";
+
+    if (!list || !list.length){
+      showEmpty();
+      return;
+    }
+    showGrid();
+
+    for (const r of list){
+      const title = esc(r.title || "—");
+      const lang = esc(r.lang || "—");
+      const date = esc(r.date || "—");
+      const comment = esc((r.comment || "").trim());
+      const dl = r.download_url || "";
+      const subscene = esc(r.subscene_link || "");
+      const releases = Array.isArray(r.releases) ? r.releases : [];
+      const directUrl = "/subtitle/" + (r.subscene_link || "");
+
+      const previewLines = releases.slice(0, 3);
+      const hasMore = releases.length > 3;
+      const releasesPreviewHtml = previewLines.length
+        ? previewLines.map(x => `<span class="release-line">${esc(x)}</span>`).join("")
+        : '<span class="text-slate-500">No releases listed</span>';
+
+      const releasesAllHtml = releases.length
+        ? releases.map(x => `<div class="release-line">${esc(x)}</div>`).join("")
+        : '<span class="text-slate-500">No releases listed</span>';
+
+      const card = document.createElement("div");
+      card.className = "card rounded-2xl border border-white/10 bg-white/5 p-4 hover:bg-white/7 transition ring-soft h-full flex flex-col";
+
+      card.innerHTML = `
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-start justify-between gap-3">
+              <a href="${directUrl}" class="subtle-link font-semibold truncate block text-slate-100 transition">
+                ${title}
+              </a>
+
+              <div class="card-actions flex items-center gap-2 shrink-0">
+                <button class="btn px-2 py-1 rounded-lg text-[11px]" data-copy="${directUrl}">
+                  🔗 Copy link
+                </button>
+              </div>
+            </div>
+
+            <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
+              <span class="px-2 py-0.5 rounded-full chip">${lang}</span>
+              <span class="px-2 py-0.5 rounded-full chip mono">${date}</span>
+            </div>
+          </div>
+
+          <button class="btn-emerald px-2.5 py-1.5 rounded-lg text-xs whitespace-nowrap shrink-0"
+            data-dl="${esc(dl)}"
+            data-name="subtitle_${r.id}.zip">
+            Download
+          </button>
+        </div>
+
+        <div class="mt-3 text-xs text-slate-400 line-clamp-2 min-h-[2.5rem]">
+          ${comment ? comment : '<span class="text-slate-500">No comment</span>'}
+        </div>
+
+        <div class="mt-3 text-[11px] text-slate-500 mono leading-relaxed release-preview min-h-[3.8rem]">
+          ${releasesPreviewHtml}
+        </div>
+
+        ${hasMore ? `
+          <details class="mt-3">
+            <summary class="cursor-pointer text-xs text-slate-300 hover:text-slate-200">
+              Show all releases (${releases.length})
+            </summary>
+            <div class="mt-2 text-[11px] text-slate-500 mono leading-relaxed bg-slate-900/45 border border-white/10 rounded-2xl p-3 max-h-44 overflow-auto">
+              ${releasesAllHtml}
+            </div>
+          </details>
+        ` : ''}
+
+      `;
+
+      const dlBtn = card.querySelector("button[data-dl]");
+      dlBtn.addEventListener("click", async () => {
+        const path = dlBtn.getAttribute("data-dl");
+        const name = dlBtn.getAttribute("data-name");
+        if (!path) return;
+        await download(path, name);
+      });
+
+      const copyBtn = card.querySelector("button[data-copy]");
+      if (copyBtn){
+        copyBtn.addEventListener("click", async (e) => {
+          e.preventDefault();
+          const path = copyBtn.getAttribute("data-copy");
+          const full = window.location.origin + path;
+          await copyText(full);
+        });
+      }
+
+      grid.appendChild(card);
+    }
+  }
+
+  let bestDownloadPath = "";
+  $("bestDownloadBtn").onclick = async () => {
+    if (!bestDownloadPath) return;
+    await download(bestDownloadPath, "best_subtitle.zip");
+  };
+
+  $("doBest").onclick = async () => {
+    try{
+      hasInteracted = true;
+      resultStatus("Scoring…");
+
+      const imdb = normalizeImdbInput($("imdb").value.trim());
+      const lang = langDD.getValue();
+      const release = $("movieQ").value.trim();
+      const q = $("q").value.trim();
+
+      if (!imdb) throw new Error("IMDb is required");
+      if (!lang) throw new Error("Language is required");
+
+      const data = await apiGet("/api/v1/subtitles/best", { imdb, lang, release, q, limit: 1400 });
+      const b = data.best;
+
+      $("bestTitle").textContent = b.title || "—";
+      $("bestMeta").textContent = `id=${b.id} | score=${b.score} | imdb=${b.imdb} | date=${b.date || ""}`;
+      $("bestComment").textContent = b.comment || "";
+      $("bestReleases").textContent = JSON.stringify(b.releases || [], null, 2);
+      $("bestBox").classList.remove("hidden");
+
+      bestDownloadPath = b.download_url || "";
+      resultStatus("Best match selected");
+      status("Done");
+    }catch(e){
+      $("bestBox").classList.add("hidden");
+      bestDownloadPath = "";
+      resultStatus("Failed");
+      status("Error");
+    }
+  };
+
+  async function loadFromPath(){
+    const path = location.pathname.replace(/^\/+/, "").replace(/\/+$/, "");
+    if (!path || path.startsWith("api")) return;
+
+    // /subtitle/<subscene_link>
+    if (path.startsWith("subtitle/")) {
+      const slug = path.slice("subtitle/".length);
+      try{
+        const data = await apiGet("/api/v1/subtitles/by-link/" + slug, {});
+        hasInteracted = true;
+
+        const imdbTT = "tt" + String(data.imdb).padStart(7, "0");
+        $("movieTitle").textContent = data.title || "—";
+        $("movieMeta").textContent = [data.lang, data.date].filter(Boolean).join(" • ");
+        $("movieDetails").textContent = data.comment || "Subtitle details";
+        $("imdb").value = imdbTT;
+        if (data.lang && langDD && typeof langDD.setValue === "function") {
+          langDD.setValue(data.lang, true);
+        }
+        $("movieTT").classList.remove("hidden");
+        $("movieTT").textContent = imdbTT;
+
+        updateTopMovieRoute();
+        updatePreviewFromImdb(imdbTT);
+        renderCards([data]);
+        $("countPill").textContent = "1";
+        resultStatus("Direct subtitle link");
+        $("empty").classList.add("hidden");
+        $("grid").classList.remove("hidden");
+        return;
+      }catch(e){
+        console.log("subtitle route not found");
+      }
+    }
+
+    // /movie/tt1234567 or /movie/tt1234567/arabic
+    if (path.startsWith("movie/")) {
+      const parts = path.split("/");
+      const imdb = parts[1] || "";
+      const lang = parts[2] || "";
+
+      try{
+        const summary = await apiGet("/api/v1/movie/" + imdb, {});
+        hasInteracted = true;
+
+        $("movieTitle").textContent = summary.title || "—";
+        $("movieMeta").textContent = `${summary.total_subs || 0} subtitles • ${(summary.languages || []).length} languages`;
+        $("movieDetails").textContent = "Archive view";
+        $("imdb").value = summary.imdb_tt || imdb;
+        if (lang && langDD && typeof langDD.setValue === "function") {
+          langDD.setValue(lang, true);
+        }
+        $("movieTT").classList.remove("hidden");
+        $("movieTT").textContent = summary.imdb_tt || imdb;
+
+        updateTopMovieRoute();
+        updatePreviewFromImdb(summary.imdb_tt || imdb);
+
+        if (lang) {
+          const langData = await apiGet("/api/v1/movie/" + imdb + "/" + lang, {});
+          renderCards(langData.results || []);
+          $("countPill").textContent = String(langData.count || 0);
+          resultStatus(`Movie archive • ${lang}`);
+          $("empty").classList.add("hidden");
+          $("grid").classList.remove("hidden");
+          updateTopMovieRoute();
+        } else {
+          const searchData = await apiGet("/api/v1/subtitles/search", { imdb: summary.imdb_tt || imdb, limit: 60 });
+          renderCards(searchData.results || []);
+          $("countPill").textContent = String(searchData.count || 0);
+          resultStatus("Movie archive");
+          $("empty").classList.add("hidden");
+          $("grid").classList.remove("hidden");
+          updateTopMovieRoute();
+        }
+
+        return;
+      }catch(e){
+        console.log("movie route not found");
+      }
+    }
+  }
+
+  $("clearAll").onclick = () => {
+    $("movieQ").value = "";
+    $("imdb").value = "";
+    $("q").value = "";
+    langDD.clear();
+    $("bestBox").classList.add("hidden");
+    bestDownloadPath = "";
+    setPreviewEmpty();
+    hasInteracted = false;
+    status("Ready");
+    history.replaceState({}, "", "/");
+    updateTopMovieRoute();
+    showEmpty();
+  };
+
+  setPreviewEmpty();
+  showEmpty();
+
+  (async () => {
+    await loadConfig();
+    await loadLanguages();
+    await loadFromPath();
+    status("Ready");
+  })();
+</script>
+</body>
+</html>
