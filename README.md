@@ -40,6 +40,7 @@ Frontend for:
 <img width="1320" height="892" alt="image" src="https://github.com/user-attachments/assets/27944dea-1442-4238-8816-89754e4ab536" />
 <img width="1320" height="892" alt="image" src="https://github.com/user-attachments/assets/a6577898-d772-4412-aaa9-3cb1dbdabeb1" />
 <img width="1320" height="892" alt="image" src="https://github.com/user-attachments/assets/da4dfdb6-cae4-46d9-aa6b-cd0ececbb3c3" />
+<img width="1320" height="892" alt="image" src="https://github.com/user-attachments/assets/99e7107c-a1f9-416e-87b2-caf65657b5c6" />
 
 
 ### Bazarr Provider
