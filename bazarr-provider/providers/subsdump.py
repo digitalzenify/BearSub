@@ -285,7 +285,7 @@ class SubsDumpProvider(Provider):
             "imdb": imdb_id,
             "lang": lang_name,
             "release": release,
-            "q": release,
+#            "q": release,
             "limit": 50,
         }
 

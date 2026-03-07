@@ -8,23 +8,27 @@ Self-hosted subtitle archive and Bazarr provider powered by a Subscene dump.
 - Direct subtitle pages
 - Movie archive pages
 - ZIP downloads
-- Self-hosted modern web UI
+- Modern self-hosted web UI
 - Bazarr provider integration
-- Simple deployment on Debian-based systems
+- Debian-friendly deployment
 
 ## Components
 
 ### Backend
+
 FastAPI backend that provides:
+
 - subtitle search
 - best-match subtitle selection
 - subtitle downloads
-- movie archive routes
-- direct subtitle pages
-- OMDb-powered preview metadata
+- movie archive pages
+- direct subtitle routes
+- OMDb-backed preview metadata
 
 ### Web UI
-Modern frontend for:
+
+Frontend for:
+
 - searching subtitles
 - browsing movie archives
 - opening direct subtitle pages
@@ -32,30 +36,31 @@ Modern frontend for:
 - sharing direct links
 
 ### Bazarr Provider
-Custom provider for Bazarr that integrates SubsDump as a subtitle source.
+
+Custom Bazarr provider that integrates SubsDump as a subtitle source.
 
 ## Project Structure
 
 - `backend/` - FastAPI backend and web UI
 - `bazarr-provider/` - Bazarr provider and patch scripts
 - `installer/` - installation helpers
-- `docs/` - documentation
+- `docs/` - project documentation
 - `examples/` - example configs and schema
-- `scripts/` - maintenance and testing scripts
+- `scripts/` - helper scripts
 
 ## Quick Start
 
-### Backend only
+### Backend
+
 1. Copy `.env.example` to `.env`
 2. Adjust database and file paths
-3. Start the backend
+3. Run the backend
 
-### Bazarr integration
-Run the provider installer script from `bazarr-provider/`.
+### Bazarr Provider
 
-## Status
+Run:
 
-SubsDump is under active development.
+    bash /opt/SubsDump/bazarr-provider/install-bazarr-provider.sh
 
 ## Roadmap
 
@@ -63,21 +68,22 @@ SubsDump is under active development.
 - [x] Web UI
 - [x] Direct subtitle pages
 - [x] Movie archive pages
-- [x] Bazarr provider prototype
-- [ ] Automated Bazarr installer
-- [ ] Frontend patch automation
-- [ ] Dockerized deployment
+- [x] Bazarr provider
+- [x] Installer / uninstaller
 - [ ] GitHub release packaging
-- [ ] Sonarr/Radarr helper tooling
-
-## License
-
-MIT License
+- [ ] Dockerized production deployment
+- [ ] Better release matching
+- [ ] TV episode matching improvements
+- [ ] Sonarr / Radarr helper tooling
 
 ## Credits
 
 Built by [D3lphi3r](https://github.com/D3lphi3r)
 
-Special thanks to whoever preserved and provided the subtitle dump used by this project.
+Special thanks to whoever preserved and provided the subtitle dump used in this project.
 
 Long live open-source projects.
+
+## License
+
+MIT

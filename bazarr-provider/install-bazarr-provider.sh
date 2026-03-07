@@ -3,56 +3,75 @@ set -euo pipefail
 
 PROJECT_ROOT="/opt/SubsDump"
 BAZARR_ROOT="/opt/bazarr"
+
 PROVIDER_SRC="$PROJECT_ROOT/bazarr-provider/providers/subsdump.py"
-PATCHES_DIR="$PROJECT_ROOT/bazarr-provider/patches"
 PROVIDER_DST_DIR="$BAZARR_ROOT/custom_libs/subliminal_patch/providers"
 PROVIDER_DST="$PROVIDER_DST_DIR/subsdump.py"
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
-echo "==> SubsDump Bazarr provider installer"
-echo "==> Project root: $PROJECT_ROOT"
-echo "==> Bazarr root:  $BAZARR_ROOT"
+PATCH_CONFIG="$PROJECT_ROOT/bazarr-provider/patches/patch_config.py"
+PATCH_GET_PROVIDERS="$PROJECT_ROOT/bazarr-provider/patches/patch_get_providers.py"
+PATCH_FRONTEND="$PROJECT_ROOT/bazarr-provider/patches/patch_frontend.py"
+
+echo
+echo "========================================"
+echo "   SubsDump Bazarr Provider Installer"
+echo "========================================"
+echo
 
 if [[ ! -d "$BAZARR_ROOT" ]]; then
-  echo "ERROR: Bazarr root not found at $BAZARR_ROOT"
-  exit 1
+    echo "ERROR: Bazarr root not found at: $BAZARR_ROOT"
+    exit 1
 fi
 
 if [[ ! -f "$PROVIDER_SRC" ]]; then
-  echo "ERROR: Provider source file not found: $PROVIDER_SRC"
-  exit 1
+    echo "ERROR: Provider source file not found:"
+    echo "       $PROVIDER_SRC"
+    exit 1
 fi
 
+if [[ ! -f "$PATCH_CONFIG" || ! -f "$PATCH_GET_PROVIDERS" || ! -f "$PATCH_FRONTEND" ]]; then
+    echo "ERROR: One or more patch scripts are missing"
+    exit 1
+fi
+
+echo "Step 1: Installing provider file"
 mkdir -p "$PROVIDER_DST_DIR"
-
-echo "==> Creating backups"
-cp -a "$BAZARR_ROOT/custom_libs/subliminal_patch/providers/__init__.py" \
-      "$BAZARR_ROOT/custom_libs/subliminal_patch/providers/__init__.py.bak.subsdump.$TIMESTAMP"
-
-cp -a "$BAZARR_ROOT/bazarr/app/config.py" \
-      "$BAZARR_ROOT/bazarr/app/config.py.bak.subsdump.$TIMESTAMP"
-
-cp -a "$BAZARR_ROOT/bazarr/app/get_providers.py" \
-      "$BAZARR_ROOT/bazarr/app/get_providers.py.bak.subsdump.$TIMESTAMP"
-
-echo "==> Installing provider"
 cp -f "$PROVIDER_SRC" "$PROVIDER_DST"
 
-echo "==> Provider copied to:"
-echo "    $PROVIDER_DST"
+echo "Installed provider:"
+echo "  $PROVIDER_DST"
+echo
 
-echo "==> Patch scripts available in:"
-echo "    $PATCHES_DIR"
+echo "Step 2: Patching Bazarr config"
+python3 "$PATCH_CONFIG"
+echo
+
+echo "Step 3: Patching Bazarr get_providers"
+python3 "$PATCH_GET_PROVIDERS"
+echo
+
+echo "Step 4: Patching Bazarr frontend"
+python3 "$PATCH_FRONTEND"
+echo
+
+echo "Step 5: Restarting Bazarr"
+systemctl restart bazarr
+
+sleep 2
 
 echo
-echo "Next steps:"
-echo "  1) Run patch_config.py"
-echo "  2) Run patch_get_providers.py"
-echo "  3) Run patch_frontend.py"
-echo "  4) Restart Bazarr"
+echo "Step 6: Bazarr status"
+systemctl status bazarr --no-pager
 echo
-echo "Example:"
-echo "  python3 $PATCHES_DIR/patch_config.py"
-echo "  python3 $PATCHES_DIR/patch_get_providers.py"
-echo "  python3 $PATCHES_DIR/patch_frontend.py"
-echo "  systemctl restart bazarr"
+
+echo "========================================"
+echo " SubsDump provider installation complete"
+echo "========================================"
+echo
+echo "Next:"
+echo "  1) Open Bazarr"
+echo "  2) Go to Settings -> Providers"
+echo "  3) Enable SubsDump"
+echo "  4) Set API URL to your SubsDump backend"
+echo "  5) Set API Key if required"
+echo
