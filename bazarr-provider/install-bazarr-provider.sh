@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="/opt/SubsDump"
+PROJECT_ROOT="/opt/BearSub"
 BAZARR_ROOT="/opt/bazarr"
 
-PROVIDER_SRC="$PROJECT_ROOT/bazarr-provider/providers/subsdump.py"
+PROVIDER_SRC="$PROJECT_ROOT/bazarr-provider/providers/bearsub.py"
 PROVIDER_DST_DIR="$BAZARR_ROOT/custom_libs/subliminal_patch/providers"
-PROVIDER_DST="$PROVIDER_DST_DIR/subsdump.py"
+PROVIDER_DST="$PROVIDER_DST_DIR/bearsub.py"
 
 PATCH_CONFIG="$PROJECT_ROOT/bazarr-provider/patches/patch_config.py"
 PATCH_GET_PROVIDERS="$PROJECT_ROOT/bazarr-provider/patches/patch_get_providers.py"
@@ -14,7 +14,7 @@ PATCH_FRONTEND="$PROJECT_ROOT/bazarr-provider/patches/patch_frontend.py"
 
 echo
 echo "========================================"
-echo "   SubsDump Bazarr Provider Installer"
+echo "   BearSub Bazarr Provider Installer"
 echo "========================================"
 echo
 
@@ -65,13 +65,13 @@ systemctl status bazarr --no-pager
 echo
 
 echo "========================================"
-echo " SubsDump provider installation complete"
+echo " BearSub provider installation complete"
 echo "========================================"
 echo
 echo "Next:"
 echo "  1) Open Bazarr"
 echo "  2) Go to Settings -> Providers"
-echo "  3) Enable SubsDump"
-echo "  4) Set API URL to your SubsDump backend"
+echo "  3) Enable BearSub"
+echo "  4) Set API URL to your BearSub backend (default: http://localhost:8765)"
 echo "  5) Set API Key if required"
 echo

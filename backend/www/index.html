@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>SubsDump</title>
+  <title>BearSub</title>
   <meta name="color-scheme" content="dark light" />
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
@@ -114,8 +114,9 @@
     <header class="flex flex-col gap-4">
       <div class="flex items-center justify-between gap-3">
         <div class="flex items-center gap-2 min-w-0">
-          <span class="px-2 py-1 rounded-full chip text-xs mono truncate">subs.d3lphi3r.com</span>
+          <span class="px-2 py-1 rounded-full chip text-xs mono truncate">BearSub</span>
           <span id="cfgPill" class="text-xs text-slate-400 truncate">…</span>
+          <span id="syncStatus" class="text-xs text-slate-400 truncate hidden">Sync: —</span>
         </div>
 
         <div id="keyBox" class="hidden w-[22rem]">
@@ -131,9 +132,9 @@
 
       <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
         <div class="min-w-0">
-          <h1 class="text-3xl sm:text-5xl font-bold tracking-tight">SubsDump</h1>
+          <h1 class="text-3xl sm:text-5xl font-bold tracking-tight">BearSub</h1>
           <p class="mt-2 text-slate-300 text-sm sm:text-base">
-            SubsDump — Subscene Archive Explorer
+            BearSub — Personal Subtitle Repository
           </p>
         </div>
         <div class="flex items-center gap-2 text-xs text-slate-400">
@@ -236,30 +237,87 @@
       </section>
     </main>
 
+    <!-- Upload Section -->
+    <section id="uploadSection" class="mt-6 glass rounded-3xl shadow-soft overflow-hidden">
+      <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
+        <div class="text-lg font-semibold">Upload Subtitle</div>
+        <button id="toggleUpload" class="btn px-3 py-1.5 rounded-xl text-xs">Show</button>
+      </div>
+      <div id="uploadForm" class="hidden p-4 sm:p-6">
+        <div id="dropZone" class="border-2 border-dashed border-white/20 rounded-2xl p-8 text-center mb-4 transition hover:border-indigo-400/50 cursor-pointer">
+          <div class="text-slate-400 text-sm">Drag &amp; drop an <span class="text-indigo-300 font-medium">.srt</span> file here, or <span class="text-indigo-300 font-medium underline cursor-pointer" id="browseLink">browse</span></div>
+          <div id="dropFileName" class="mt-2 text-xs text-slate-500 mono"></div>
+          <input id="uploadFileInput" type="file" accept=".srt" class="hidden" />
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div>
+            <label class="text-xs text-slate-300/80">IMDb ID <span class="text-red-400">*</span></label>
+            <input id="upImdb" class="input w-full mt-1 px-3 py-2 rounded-xl mono" placeholder="tt1234567" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-300/80">Title <span class="text-red-400">*</span></label>
+            <input id="upTitle" class="input w-full mt-1 px-3 py-2 rounded-xl" placeholder="Movie or show title" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-300/80">Year</label>
+            <input id="upYear" class="input w-full mt-1 px-3 py-2 rounded-xl" type="number" placeholder="2024" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-300/80">Language <span class="text-red-400">*</span></label>
+            <input id="upLang" class="input w-full mt-1 px-3 py-2 rounded-xl" placeholder="english" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-300/80">Release Name <span class="text-red-400">*</span></label>
+            <input id="upRelease" class="input w-full mt-1 px-3 py-2 rounded-xl" placeholder="Movie.2024.BluRay.x264" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-300/80">Type</label>
+            <select id="upType" class="input w-full mt-1 px-3 py-2 rounded-xl">
+              <option value="movie">Movie</option>
+              <option value="episode">Episode</option>
+            </select>
+          </div>
+          <div id="upSeasonGroup" class="hidden">
+            <label class="text-xs text-slate-300/80">Season</label>
+            <input id="upSeason" class="input w-full mt-1 px-3 py-2 rounded-xl" type="number" placeholder="1" />
+          </div>
+          <div id="upEpisodeGroup" class="hidden">
+            <label class="text-xs text-slate-300/80">Episode</label>
+            <input id="upEpisode" class="input w-full mt-1 px-3 py-2 rounded-xl" type="number" placeholder="1" />
+          </div>
+          <div>
+            <label class="text-xs text-slate-300/80">Source</label>
+            <input id="upSource" class="input w-full mt-1 px-3 py-2 rounded-xl" placeholder="manual" value="manual" />
+          </div>
+        </div>
+        <div class="mt-4 flex items-center gap-3">
+          <button id="uploadBtn" class="btn-primary px-5 py-2 rounded-xl text-sm">Upload</button>
+          <span id="uploadStatus" class="text-xs text-slate-400"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section id="statsSection" class="mt-6 glass rounded-3xl shadow-soft overflow-hidden">
+      <div class="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between gap-3">
+        <div class="text-lg font-semibold">Stats</div>
+        <button id="toggleStats" class="btn px-3 py-1.5 rounded-xl text-xs">Show</button>
+      </div>
+      <div id="statsContent" class="hidden p-4 sm:p-6">
+        <div id="statsBody" class="text-slate-400 text-sm">Loading…</div>
+      </div>
+    </section>
+
     <footer class="mt-14 pb-8 text-center text-xs text-slate-500">
       <div class="flex flex-col items-center gap-2">
         <div class="flex items-center gap-2">
-          <a href="https://github.com/D3lphi3r/SubsDump"
+          <a href="https://github.com/BearSub/BearSub"
              target="_blank"
              rel="noreferrer"
              class="text-slate-300 hover:text-indigo-300 transition font-medium">
-            SubsDump
+            BearSub
           </a>
-          <span class="text-[10px] text-slate-600">v1.0</span>
-        </div>
-
-        <div>
-          Built by
-          <a href="https://github.com/D3lphi3r/"
-             target="_blank"
-             rel="noreferrer"
-             class="text-slate-300 hover:text-indigo-300 transition font-medium">
-            D3lphi3r
-          </a>
-        </div>
-
-        <div class="text-slate-500">
-          Special thanks to whoever provided the Subscene dump used in this project.
+          <span class="text-[10px] text-slate-600">v2.0</span>
         </div>
 
         <div class="italic text-slate-600">
@@ -752,6 +810,13 @@
     }, 320);
   });
 
+  function sourcePillStyle(src) {
+    const s = (src || "").toLowerCase();
+    if (s.includes("bazarr")) return "border-color:rgba(59,130,246,.4);background:rgba(59,130,246,.15);color:#93c5fd";
+    if (s.includes("whisper")) return "border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.15);color:#d8b4fe";
+    return "border-color:rgba(100,116,139,.35);background:rgba(100,116,139,.12);color:#94a3b8";
+  }
+
   function renderCards(list){
     const grid = $("grid");
     grid.innerHTML = "";
@@ -802,6 +867,7 @@
 
             <div class="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-400">
               <span class="px-2 py-0.5 rounded-full chip">${lang}</span>
+              ${r.source ? `<span class="px-2 py-0.5 rounded-full chip" style="${sourcePillStyle(r.source)}">${esc(r.source)}</span>` : ''}
               <span class="px-2 py-0.5 rounded-full chip mono">${date}</span>
             </div>
           </div>
@@ -993,6 +1059,116 @@
     showEmpty();
   };
 
+  // --- Upload Section ---
+  $("toggleUpload").onclick = () => {
+    const form = $("uploadForm");
+    const isHidden = form.classList.toggle("hidden");
+    $("toggleUpload").textContent = isHidden ? "Show" : "Hide";
+  };
+
+  $("upType").addEventListener("change", () => {
+    const isEp = $("upType").value === "episode";
+    $("upSeasonGroup").classList.toggle("hidden", !isEp);
+    $("upEpisodeGroup").classList.toggle("hidden", !isEp);
+  });
+
+  const dropZone = $("dropZone");
+  const fileInput = $("uploadFileInput");
+  let uploadFile = null;
+
+  $("browseLink").onclick = () => fileInput.click();
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("border-indigo-400/50"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("border-indigo-400/50"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("border-indigo-400/50");
+    const f = e.dataTransfer.files[0];
+    if (f && f.name.endsWith(".srt")) { uploadFile = f; $("dropFileName").textContent = f.name; }
+  });
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) { uploadFile = fileInput.files[0]; $("dropFileName").textContent = uploadFile.name; }
+  });
+
+  $("uploadBtn").onclick = async () => {
+    const uStatus = $("uploadStatus");
+    if (!uploadFile) { uStatus.textContent = "No file selected"; return; }
+    const imdb = $("upImdb").value.trim();
+    const title = $("upTitle").value.trim();
+    const language = $("upLang").value.trim();
+    const release_name = $("upRelease").value.trim();
+    if (!imdb || !title || !language || !release_name) { uStatus.textContent = "Fill required fields"; return; }
+
+    const fd = new FormData();
+    fd.append("file", uploadFile);
+    fd.append("imdb_id", imdb);
+    fd.append("title", title);
+    if ($("upYear").value) fd.append("year", $("upYear").value);
+    fd.append("language", language);
+    fd.append("release_name", release_name);
+    fd.append("type", $("upType").value);
+    if ($("upType").value === "episode") {
+      if ($("upSeason").value) fd.append("season", $("upSeason").value);
+      if ($("upEpisode").value) fd.append("episode", $("upEpisode").value);
+    }
+    fd.append("source", $("upSource").value || "manual");
+
+    uStatus.textContent = "Uploading…";
+    try {
+      const h = {};
+      const k = getKey();
+      if (forceEnterKeys && k) h["X-API-Key"] = k;
+      const res = await fetch("/api/subtitles/upload", { method: "POST", headers: h, body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Upload failed");
+      uStatus.textContent = `Uploaded! id=${data.id}`;
+    } catch(e) {
+      uStatus.textContent = "Error: " + e.message;
+    }
+  };
+
+  // --- Stats Section ---
+  $("toggleStats").onclick = async () => {
+    const content = $("statsContent");
+    const isHidden = content.classList.toggle("hidden");
+    $("toggleStats").textContent = isHidden ? "Show" : "Hide";
+    if (!isHidden) await loadStats();
+  };
+
+  async function loadStats() {
+    const body = $("statsBody");
+    try {
+      const data = await apiGet("/api/subtitles/stats", {});
+      let html = `<div class="mb-4 text-2xl font-bold text-slate-200">${data.total.toLocaleString()} <span class="text-base font-normal text-slate-400">subtitles total</span></div>`;
+      html += `<div class="grid grid-cols-1 md:grid-cols-2 gap-6">`;
+      html += `<div><div class="text-xs text-slate-400 mb-2 font-semibold uppercase tracking-wide">By Language</div><div class="space-y-1">`;
+      for (const l of (data.by_language || [])) {
+        html += `<div class="flex items-center justify-between text-sm"><span class="text-slate-300">${esc(l.language || "—")}</span><span class="mono text-slate-400">${Number(l.count).toLocaleString()}</span></div>`;
+      }
+      html += `</div></div>`;
+      html += `<div><div class="text-xs text-slate-400 mb-2 font-semibold uppercase tracking-wide">By Source</div><div class="space-y-1">`;
+      for (const s of (data.by_source || [])) {
+        html += `<div class="flex items-center justify-between text-sm"><span class="text-slate-300">${esc(s.source || "—")}</span><span class="mono text-slate-400">${Number(s.count).toLocaleString()}</span></div>`;
+      }
+      html += `</div></div></div>`;
+      body.innerHTML = html;
+    } catch(e) {
+      body.textContent = "Failed to load stats.";
+    }
+  }
+
+  // --- Sync Status ---
+  async function loadSyncStatus() {
+    try {
+      const data = await apiGet("/api/sync/status", {});
+      const el = $("syncStatus");
+      if (data.last_sync_timestamp) {
+        const d = new Date(data.last_sync_timestamp);
+        el.textContent = `Sync: ${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`;
+        el.classList.remove("hidden");
+      }
+    } catch(_) {}
+  }
+
   setPreviewEmpty();
   showEmpty();
 
@@ -1000,6 +1176,7 @@
     await loadConfig();
     await loadLanguages();
     await loadFromPath();
+    await loadSyncStatus();
     status("Ready");
   })();
 </script>
