@@ -1083,7 +1083,7 @@
     e.preventDefault();
     dropZone.classList.remove("border-indigo-400/50");
     const f = e.dataTransfer.files[0];
-    if (f && f.name.endsWith(".srt")) { uploadFile = f; $("dropFileName").textContent = f.name; }
+    if (f && f.name.toLowerCase().endsWith(".srt")) { uploadFile = f; $("dropFileName").textContent = f.name; }
   });
   fileInput.addEventListener("change", () => {
     if (fileInput.files[0]) { uploadFile = fileInput.files[0]; $("dropFileName").textContent = uploadFile.name; }

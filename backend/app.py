@@ -154,29 +154,37 @@ def sanitize_path_component(s: str) -> str:
 def subtitle_file_path(imdb_id: str, language: str, release_name: str) -> str:
     """Return an absolute path for storing a subtitle file.
 
-    Sanitizes all path components and ensures the result stays within SUBS_DIR.
-    Appends a counter suffix when the file already exists.
+    Sanitizes all path components, validates the final resolved path stays
+    within SUBS_DIR (preventing path traversal), and appends a counter suffix
+    when the file already exists.
     """
     safe_imdb = sanitize_path_component(imdb_id)
     safe_lang = sanitize_path_component(language)
     safe_rel = sanitize_path_component(release_name)
 
     subs_root = os.path.realpath(SUBS_DIR)
-    directory = os.path.normpath(os.path.join(subs_root, safe_imdb, safe_lang))
+    directory = os.path.realpath(os.path.join(subs_root, safe_imdb, safe_lang))
 
-    # Prevent path traversal escaping SUBS_DIR
+    # Guard: directory must be inside SUBS_DIR
     if not _is_safe_path(subs_root, directory):
         raise ValueError(f"Computed path escapes SUBS_DIR: {directory}")
 
     os.makedirs(directory, exist_ok=True)
 
-    candidate = os.path.join(directory, f"{safe_rel}.srt")
+    def _safe_candidate(name: str) -> str:
+        """Build a candidate path and raise ValueError if it escapes SUBS_DIR."""
+        path = os.path.realpath(os.path.join(directory, name))
+        if not _is_safe_path(subs_root, path):
+            raise ValueError(f"Candidate path escapes SUBS_DIR: {path}")
+        return path
+
+    candidate = _safe_candidate(f"{safe_rel}.srt")
     if not os.path.exists(candidate):
         return candidate
 
     counter = 2
     while True:
-        candidate = os.path.join(directory, f"{safe_rel}_{counter}.srt")
+        candidate = _safe_candidate(f"{safe_rel}_{counter}.srt")
         if not os.path.exists(candidate):
             return candidate
         counter += 1
@@ -282,140 +290,146 @@ async def sync_bazarr_once() -> Dict[str, Any]:
     log.info("Bazarr sync: starting")
     conn = _db_connect()
 
-    # Retrieve last sync timestamp
-    row = conn.execute(
-        "SELECT last_sync_timestamp FROM sync_state WHERE sync_type=? ORDER BY id DESC LIMIT 1",
-        ("bazarr",),
-    ).fetchone()
-    last_ts: Optional[str] = row["last_sync_timestamp"] if row else None
+    try:
+        # Retrieve last sync timestamp
+        row = conn.execute(
+            "SELECT last_sync_timestamp FROM sync_state WHERE sync_type=? ORDER BY id DESC LIMIT 1",
+            ("bazarr",),
+        ).fetchone()
+        last_ts: Optional[str] = row["last_sync_timestamp"] if row else None
 
-    items_synced = 0
-    errors = 0
+        items_synced = 0
+        errors = 0
 
-    async with aiohttp.ClientSession() as session:
-        for endpoint in ("history/episodes", "history/movies"):
-            url = f"{BAZARR_URL}/api/{endpoint}"
-            params = {
-                "apikey": BAZARR_API_KEY,
-                "page": 1,
-                "per_page": 100,
-                "action": 1,
-            }
-            try:
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        log.warning("Bazarr sync: %s returned %s", url, resp.status)
-                        continue
-                    data = await resp.json(content_type=None)
-            except Exception as exc:
-                log.warning("Bazarr sync: failed to reach %s: %s", url, exc)
-                continue
-
-            records = data.get("data") or []
-            is_episode = "episodes" in endpoint
-
-            for item in records:
+        async with aiohttp.ClientSession() as session:
+            for endpoint in ("history/episodes", "history/movies"):
+                url = f"{BAZARR_URL}/api/{endpoint}"
+                params = {
+                    "apikey": BAZARR_API_KEY,
+                    "page": 1,
+                    "per_page": 100,
+                    "action": 1,
+                }
                 try:
-                    ts = item.get("timestamp") or item.get("date") or ""
-                    if last_ts and ts and ts <= last_ts:
-                        continue
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status != 200:
+                            log.warning("Bazarr sync: %s returned %s", url, resp.status)
+                            continue
+                        data = await resp.json(content_type=None)
+                except Exception as exc:
+                    log.warning("Bazarr sync: failed to reach %s: %s", url, exc)
+                    continue
 
-                    video_path: str = item.get("video_path") or item.get("path") or ""
-                    sub_path: str = item.get("subtitles_path") or item.get("subtitle_path") or ""
-                    if not sub_path:
-                        # Try to derive from video path (subtitle likely shares base name)
-                        if video_path:
-                            base = os.path.splitext(video_path)[0]
-                            sub_path = base + ".srt"
-                            log.debug("Bazarr sync: derived subtitle path from video: %s", sub_path)
-                        else:
-                            log.debug("Bazarr sync: no subtitle path and no video path, skipping item")
+                records = data.get("data") or []
+                is_episode = "episodes" in endpoint
+
+                for item in records:
+                    try:
+                        ts = item.get("timestamp") or item.get("date") or ""
+                        if last_ts and ts and ts <= last_ts:
                             continue
 
-                    # Resolve against MEDIA_ROOT_DIR if not absolute
-                    if not os.path.isabs(sub_path):
-                        sub_path = os.path.join(MEDIA_ROOT_DIR, sub_path.lstrip("/"))
+                        video_path: str = item.get("video_path") or item.get("path") or ""
+                        sub_path: str = item.get("subtitles_path") or item.get("subtitle_path") or ""
+                        if not sub_path:
+                            # Try to derive from video path (subtitle likely shares base name)
+                            if video_path:
+                                base = os.path.splitext(video_path)[0]
+                                sub_path = base + ".srt"
+                                log.debug("Bazarr sync: derived subtitle path from video: %s", sub_path)
+                            else:
+                                log.debug("Bazarr sync: no subtitle path and no video path, skipping item")
+                                continue
 
-                    # Validate that resolved path stays within MEDIA_ROOT_DIR
-                    media_root_real = os.path.realpath(MEDIA_ROOT_DIR)
-                    sub_path_real = os.path.realpath(sub_path)
-                    if not _is_safe_path(media_root_real, sub_path_real):
-                        log.warning("Bazarr sync: path escapes MEDIA_ROOT_DIR, skipping: %s", sub_path)
-                        continue
+                        # Resolve against MEDIA_ROOT_DIR if not absolute
+                        if not os.path.isabs(sub_path):
+                            sub_path = os.path.join(MEDIA_ROOT_DIR, sub_path.lstrip("/"))
 
-                    if not os.path.isfile(sub_path):
-                        log.debug("Bazarr sync: subtitle file not found: %s", sub_path)
-                        continue
+                        # Validate that resolved path stays within MEDIA_ROOT_DIR
+                        media_root_real = os.path.realpath(MEDIA_ROOT_DIR)
+                        sub_path_real = os.path.realpath(sub_path)
+                        if not _is_safe_path(media_root_real, sub_path_real):
+                            log.warning("Bazarr sync: path escapes MEDIA_ROOT_DIR, skipping: %s", sub_path)
+                            continue
 
-                    with open(sub_path, "rb") as fh:
-                        content = fh.read()
+                        if not os.path.isfile(sub_path_real):
+                            log.debug("Bazarr sync: subtitle file not found: %s", sub_path_real)
+                            continue
 
-                    file_hash = hash_of_bytes(content)
+                        with open(sub_path_real, "rb") as fh:
+                            content = fh.read()
 
-                    # Deduplication by hash
-                    existing = conn.execute(
-                        "SELECT id FROM subtitles WHERE file_hash=?", (file_hash,)
-                    ).fetchone()
-                    if existing:
-                        continue
+                        file_hash = hash_of_bytes(content)
 
-                    imdb_id: str = str(item.get("imdb_id") or item.get("series_imdb_id") or "")
-                    if imdb_id and imdb_id.isdigit():
-                        imdb_id = "tt" + imdb_id
-                    title: str = item.get("title") or item.get("series_title") or os.path.basename(video_path)
-                    language: str = item.get("language") or item.get("lang") or "unknown"
-                    release_name: str = item.get("release_info") or os.path.splitext(os.path.basename(sub_path))[0]
-                    season = item.get("season")
-                    episode = item.get("episode")
-                    media_type = "episode" if is_episode else "movie"
-                    year_val = item.get("year")
+                        # Deduplication by hash
+                        existing = conn.execute(
+                            "SELECT id FROM subtitles WHERE file_hash=?", (file_hash,)
+                        ).fetchone()
+                        if existing:
+                            continue
 
-                    dest_path = subtitle_file_path(imdb_id or "unknown", language, release_name)
-                    with open(dest_path, "wb") as fh:
-                        fh.write(content)
+                        imdb_id: str = str(item.get("imdb_id") or item.get("series_imdb_id") or "")
+                        if imdb_id and imdb_id.isdigit():
+                            imdb_id = "tt" + imdb_id
+                        title: str = item.get("title") or item.get("series_title") or os.path.basename(video_path)
+                        language: str = item.get("language") or item.get("lang") or "unknown"
+                        release_name: str = item.get("release_info") or os.path.splitext(os.path.basename(sub_path_real))[0]
+                        season = item.get("season")
+                        episode = item.get("episode")
+                        media_type = "episode" if is_episode else "movie"
+                        year_val = item.get("year")
 
-                    now = datetime.now(timezone.utc).isoformat()
-                    with _DB_LOCK:
-                        conn.execute(
-                            """INSERT INTO subtitles
-                               (imdb_id, title, year, type, season, episode, language,
-                                release_name, file_path, file_hash, source, added_date, file_size)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (
-                                imdb_id, title, year_val, media_type, season, episode,
-                                language, release_name, dest_path, file_hash,
-                                "bazarr-sync", now, len(content),
-                            ),
-                        )
-                        if imdb_id:
+                        dest_path = subtitle_file_path(imdb_id or "unknown", language, release_name)
+                        subs_root = os.path.realpath(SUBS_DIR)
+                        if not _is_safe_path(subs_root, dest_path):
+                            log.warning("Bazarr sync: computed dest path escapes SUBS_DIR, skipping")
+                            continue
+                        with open(dest_path, "wb") as fh:
+                            fh.write(content)
+
+                        now = datetime.now(timezone.utc).isoformat()
+                        with _DB_LOCK:
                             conn.execute(
-                                """INSERT INTO suggest_titles (imdb_id, title, year, cnt)
-                                   VALUES (?,?,?,1)
-                                   ON CONFLICT(imdb_id) DO UPDATE SET cnt=cnt+1""",
-                                (imdb_id, title, year_val),
+                                """INSERT INTO subtitles
+                                   (imdb_id, title, year, type, season, episode, language,
+                                    release_name, file_path, file_hash, source, added_date, file_size)
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (
+                                    imdb_id, title, year_val, media_type, season, episode,
+                                    language, release_name, dest_path, file_hash,
+                                    "bazarr-sync", now, len(content),
+                                ),
                             )
-                        conn.commit()
+                            if imdb_id:
+                                conn.execute(
+                                    """INSERT INTO suggest_titles (imdb_id, title, year, cnt)
+                                       VALUES (?,?,?,1)
+                                       ON CONFLICT(imdb_id) DO UPDATE SET cnt=cnt+1""",
+                                    (imdb_id, title, year_val),
+                                )
+                            conn.commit()
 
-                    items_synced += 1
-                    log.info("Bazarr sync: imported %s -> %s", sub_path, dest_path)
+                        items_synced += 1
+                        log.info("Bazarr sync: imported %s -> %s", sub_path_real, dest_path)
 
-                except Exception as exc:
-                    log.warning("Bazarr sync: error processing item: %s", exc)
-                    errors += 1
+                    except Exception as exc:
+                        log.warning("Bazarr sync: error processing item: %s", exc)
+                        errors += 1
 
-    now = datetime.now(timezone.utc).isoformat()
-    status = "ok" if errors == 0 else f"partial ({errors} errors)"
-    with _DB_LOCK:
-        conn.execute(
-            """INSERT INTO sync_state (sync_type, last_sync_timestamp, last_sync_status, items_synced)
-               VALUES (?,?,?,?)""",
-            ("bazarr", now, status, items_synced),
-        )
-        conn.commit()
-    conn.close()
+        now = datetime.now(timezone.utc).isoformat()
+        status = "ok" if errors == 0 else f"partial ({errors} errors)"
+        with _DB_LOCK:
+            conn.execute(
+                """INSERT INTO sync_state (sync_type, last_sync_timestamp, last_sync_status, items_synced)
+                   VALUES (?,?,?,?)""",
+                ("bazarr", now, status, items_synced),
+            )
+            conn.commit()
 
-    log.info("Bazarr sync: done. synced=%d errors=%d", items_synced, errors)
-    return {"synced": items_synced, "errors": errors, "timestamp": now, "status": status}
+        log.info("Bazarr sync: done. synced=%d errors=%d", items_synced, errors)
+        return {"synced": items_synced, "errors": errors, "timestamp": now, "status": status}
+    finally:
+        conn.close()
 
 
 async def bazarr_sync_loop() -> None:
@@ -425,7 +439,7 @@ async def bazarr_sync_loop() -> None:
         try:
             await sync_bazarr_once()
         except Exception as exc:
-            log.error("Bazarr sync loop error: %s", exc)
+            log.exception("Bazarr sync loop error: %s", exc)
         await asyncio.sleep(BAZARR_SYNC_INTERVAL_HOURS * 3600)
 
 
@@ -834,6 +848,10 @@ async def upload_subtitle(
         imdb_norm = "tt" + imdb_norm
 
     dest_path = subtitle_file_path(imdb_norm, language, release_name)
+    # dest_path is already realpath-validated by subtitle_file_path(); open it directly.
+    subs_root = os.path.realpath(SUBS_DIR)
+    if not _is_safe_path(subs_root, dest_path):
+        raise HTTPException(status_code=500, detail="Internal path error")
     with open(dest_path, "wb") as fh:
         fh.write(content)
 
@@ -986,6 +1004,9 @@ async def update_subtitle(
             updates.get("language") or row["language"] or "unknown",
             updates.get("release_name") or row["release_name"] or f"sub_{sub_id}",
         )
+        # Final guard before writing
+        if not _is_safe_path(subs_root, dest_path):
+            raise HTTPException(status_code=500, detail="Internal path error")
         with open(dest_path, "wb") as fh:
             fh.write(content)
         updates["file_path"] = dest_path
@@ -995,8 +1016,17 @@ async def update_subtitle(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    set_clause = ", ".join(f"{k}=?" for k in updates)
-    values = list(updates.values()) + [sub_id]
+    # Allowlist of columns that may be updated to prevent SQL injection
+    _UPDATABLE_COLUMNS = frozenset({
+        "imdb_id", "title", "year", "type", "season", "episode",
+        "language", "release_name", "source", "file_path", "file_hash", "file_size",
+    })
+    safe_updates = {k: v for k, v in updates.items() if k in _UPDATABLE_COLUMNS}
+    if not safe_updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    set_clause = ", ".join(f"{k}=?" for k in safe_updates)
+    values = list(safe_updates.values()) + [sub_id]
     with _DB_LOCK:
         wconn = _db_connect()
         wconn.execute(f"UPDATE subtitles SET {set_clause} WHERE id=?", values)
