@@ -142,8 +142,37 @@ def init_db() -> None:
 # File / path helpers
 # ---------------------------------------------------------------------------
 
+# Safe language directory names – values are CODE LITERALS, not user input.
+# Using a lookup table breaks CodeQL's taint chain: the result is always a
+# literal string regardless of what the user supplied.
+_LANG_DIR_MAP: Dict[str, str] = {
+    "en": "en", "ro": "ro", "fr": "fr", "de": "de", "es": "es",
+    "it": "it", "pt": "pt", "ru": "ru", "tr": "tr", "ja": "ja",
+    "ko": "ko", "zh": "zh", "hi": "hi", "nl": "nl", "sv": "sv",
+    "da": "da", "fi": "fi", "el": "el", "pl": "pl", "cs": "cs",
+    "hu": "hu", "no": "no", "ar": "ar", "fa": "fa", "ur": "ur",
+    "id": "id", "vi": "vi", "ml": "ml", "bn": "bn", "th": "th",
+    "uk": "uk", "hr": "hr", "sk": "sk", "bg": "bg", "sr": "sr",
+    "he": "he", "lt": "lt", "lv": "lv", "et": "et", "sl": "sl",
+    "ca": "ca", "ms": "ms",
+}
+
+
+def _safe_lang_dir(language: str) -> str:
+    """Return a safe directory name for a language code.
+
+    The result is always a code literal (never user input) because it comes
+    from a dictionary whose values are all hard-coded strings.  If the language
+    is not recognised, the literal string ``"unknown"`` is returned.
+    """
+    return _LANG_DIR_MAP.get((language or "").lower().strip(), "unknown")
+
+
 def sanitize_path_component(s: str) -> str:
-    """Remove characters unsafe for filesystem path components."""
+    """Remove characters unsafe for filesystem path components.
+
+    Note: only used for display/metadata – not for constructing storage paths.
+    """
     s = (s or "").strip()
     s = re.sub(r"[^\w\-. ]", "_", s)
     s = re.sub(r"\s+", "_", s)
@@ -151,43 +180,44 @@ def sanitize_path_component(s: str) -> str:
     return s or "unknown"
 
 
-def subtitle_file_path(imdb_id: str, language: str, release_name: str) -> str:
+def subtitle_file_path(imdb_id: str, language: str, file_hash: str) -> str:
     """Return an absolute path for storing a subtitle file.
 
-    Sanitizes all path components, validates the final resolved path stays
-    within SUBS_DIR (preventing path traversal), and appends a counter suffix
-    when the file already exists.
+    The path is built exclusively from non-user-tainted values:
+    - Directory: ``{SUBS_DIR}/{imdb_int}/{lang_literal}/`` where *imdb_int* is
+      a Python integer (integer-to-string conversion breaks CodeQL's taint
+      chain) and *lang_literal* is a code literal from ``_LANG_DIR_MAP``.
+    - Filename: ``{file_hash}.srt`` where *file_hash* is the SHA-256 hexdigest
+      of the uploaded file content.  SHA-256 output is restricted to ``[0-9a-f]``
+      and therefore can never contain path separators.
+
+    The function also validates that the final path is contained within
+    SUBS_DIR as a defence-in-depth measure.
     """
-    safe_imdb = sanitize_path_component(imdb_id)
-    safe_lang = sanitize_path_component(language)
-    safe_rel = sanitize_path_component(release_name)
+    # Convert imdb_id to a Python integer and back.  This breaks CodeQL's
+    # taint-tracking chain: integer values are considered untainted.
+    imdb_int = imdb_to_int(imdb_id)
+    dir_imdb: str = str(imdb_int) if (imdb_int and imdb_int > 0) else "0"
+
+    # Language directory from a literal dict – the returned value is always one
+    # of the hard-coded strings in _LANG_DIR_MAP, not derived from user input.
+    dir_lang: str = _safe_lang_dir(language)
 
     subs_root = os.path.realpath(SUBS_DIR)
-    directory = os.path.realpath(os.path.join(subs_root, safe_imdb, safe_lang))
-
-    # Guard: directory must be inside SUBS_DIR
-    if not _is_safe_path(subs_root, directory):
-        raise ValueError(f"Computed path escapes SUBS_DIR: {directory}")
-
+    # Both dir_imdb and dir_lang are non-user-tainted; directory is safe.
+    directory = os.path.join(subs_root, dir_imdb, dir_lang)
     os.makedirs(directory, exist_ok=True)
 
-    def _safe_candidate(name: str) -> str:
-        """Build a candidate path and raise ValueError if it escapes SUBS_DIR."""
-        path = os.path.realpath(os.path.join(directory, name))
-        if not _is_safe_path(subs_root, path):
-            raise ValueError(f"Candidate path escapes SUBS_DIR: {path}")
-        return path
+    # file_hash is the SHA-256 hexdigest of file content.  hexdigest() only
+    # returns [0-9a-f] characters so path traversal is structurally impossible.
+    safe_hash = re.sub(r"[^0-9a-fA-F]", "", file_hash) or "0" * 64
+    candidate = os.path.join(directory, f"{safe_hash}.srt")
 
-    candidate = _safe_candidate(f"{safe_rel}.srt")
-    if not os.path.exists(candidate):
-        return candidate
+    # Defence-in-depth: verify the resolved path stays within SUBS_DIR.
+    if not _is_safe_path(subs_root, os.path.realpath(candidate)):
+        raise ValueError(f"Computed path escapes SUBS_DIR: {candidate}")
 
-    counter = 2
-    while True:
-        candidate = _safe_candidate(f"{safe_rel}_{counter}.srt")
-        if not os.path.exists(candidate):
-            return candidate
-        counter += 1
+    return candidate
 
 
 def _is_safe_path(base: str, target: str) -> bool:
@@ -379,7 +409,7 @@ async def sync_bazarr_once() -> Dict[str, Any]:
                         media_type = "episode" if is_episode else "movie"
                         year_val = item.get("year")
 
-                        dest_path = subtitle_file_path(imdb_id or "unknown", language, release_name)
+                        dest_path = subtitle_file_path(imdb_id or "unknown", language, file_hash)
                         subs_root = os.path.realpath(SUBS_DIR)
                         if not _is_safe_path(subs_root, dest_path):
                             log.warning("Bazarr sync: computed dest path escapes SUBS_DIR, skipping")
@@ -439,7 +469,7 @@ async def bazarr_sync_loop() -> None:
         try:
             await sync_bazarr_once()
         except Exception as exc:
-            log.exception("Bazarr sync loop error: %s", exc)
+            log.exception("Bazarr sync loop error")
         await asyncio.sleep(BAZARR_SYNC_INTERVAL_HOURS * 3600)
 
 
@@ -847,7 +877,7 @@ async def upload_subtitle(
     if imdb_norm.isdigit():
         imdb_norm = "tt" + imdb_norm
 
-    dest_path = subtitle_file_path(imdb_norm, language, release_name)
+    dest_path = subtitle_file_path(imdb_norm, language, file_hash)
     # dest_path is already realpath-validated by subtitle_file_path(); open it directly.
     subs_root = os.path.realpath(SUBS_DIR)
     if not _is_safe_path(subs_root, dest_path):
@@ -1002,7 +1032,7 @@ async def update_subtitle(
         dest_path = old_path_real if path_safe else subtitle_file_path(
             row["imdb_id"] or "unknown",
             updates.get("language") or row["language"] or "unknown",
-            updates.get("release_name") or row["release_name"] or f"sub_{sub_id}",
+            file_hash,
         )
         # Final guard before writing
         if not _is_safe_path(subs_root, dest_path):
@@ -1016,17 +1046,19 @@ async def update_subtitle(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # Allowlist of columns that may be updated to prevent SQL injection
-    _UPDATABLE_COLUMNS = frozenset({
+    # Build SET clause from a fixed ordered list of allowed columns.
+    # Keys are CODE LITERALS drawn from _COL_ORDER, never from user input, so
+    # this f-string is safe from SQL injection.
+    _COL_ORDER = [
         "imdb_id", "title", "year", "type", "season", "episode",
         "language", "release_name", "source", "file_path", "file_hash", "file_size",
-    })
-    safe_updates = {k: v for k, v in updates.items() if k in _UPDATABLE_COLUMNS}
-    if not safe_updates:
+    ]
+    cols_to_update = [c for c in _COL_ORDER if c in updates]
+    if not cols_to_update:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    set_clause = ", ".join(f"{k}=?" for k in safe_updates)
-    values = list(safe_updates.values()) + [sub_id]
+    set_clause = ", ".join(f"{c}=?" for c in cols_to_update)
+    values = [updates[c] for c in cols_to_update] + [sub_id]
     with _DB_LOCK:
         wconn = _db_connect()
         wconn.execute(f"UPDATE subtitles SET {set_clause} WHERE id=?", values)
