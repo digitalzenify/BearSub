@@ -51,7 +51,10 @@ BAZARR_SYNC_ENABLED = os.getenv("BAZARR_SYNC_ENABLED", "false").strip().lower() 
 )
 BAZARR_URL = os.getenv("BAZARR_URL", "http://localhost:6767").rstrip("/")
 BAZARR_API_KEY = os.getenv("BAZARR_API_KEY", "")
-BAZARR_SYNC_INTERVAL_HOURS = max(0.1, float(os.getenv("BAZARR_SYNC_INTERVAL_HOURS", "6")))
+try:
+    BAZARR_SYNC_INTERVAL_HOURS = max(0.5, float(os.getenv("BAZARR_SYNC_INTERVAL_HOURS", "6")))
+except ValueError:
+    BAZARR_SYNC_INTERVAL_HOURS = 6.0
 MEDIA_ROOT_DIR = os.getenv("MEDIA_ROOT_DIR", "/media")
 BACKUP_DIR = os.getenv("BACKUP_DIR", "./backups")
 
@@ -162,7 +165,7 @@ def subtitle_file_path(imdb_id: str, language: str, release_name: str) -> str:
     directory = os.path.normpath(os.path.join(subs_root, safe_imdb, safe_lang))
 
     # Prevent path traversal escaping SUBS_DIR
-    if not directory.startswith(subs_root + os.sep) and directory != subs_root:
+    if not _is_safe_path(subs_root, directory):
         raise ValueError(f"Computed path escapes SUBS_DIR: {directory}")
 
     os.makedirs(directory, exist_ok=True)
@@ -179,13 +182,20 @@ def subtitle_file_path(imdb_id: str, language: str, release_name: str) -> str:
         counter += 1
 
 
-def md5_of_bytes(data: bytes) -> str:
-    return hashlib.md5(data).hexdigest()
+def _is_safe_path(base: str, target: str) -> bool:
+    """Return True if *target* is the same as or a descendant of *base*."""
+    try:
+        return os.path.commonpath([base, target]) == base
+    except ValueError:
+        return False
 
 
-# ---------------------------------------------------------------------------
-# Row serialisation
-# ---------------------------------------------------------------------------
+def hash_of_bytes(data: bytes) -> str:
+    """Return SHA-256 hex digest of data (used for subtitle deduplication)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+
 
 def serialize_row(r: Any, score: Optional[float] = None) -> Dict[str, Any]:
     """Serialise a SQLite Row (or dict) to the API response shape."""
@@ -313,11 +323,13 @@ async def sync_bazarr_once() -> Dict[str, Any]:
                     video_path: str = item.get("video_path") or item.get("path") or ""
                     sub_path: str = item.get("subtitles_path") or item.get("subtitle_path") or ""
                     if not sub_path:
-                        # Try to derive from video path
+                        # Try to derive from video path (subtitle likely shares base name)
                         if video_path:
                             base = os.path.splitext(video_path)[0]
                             sub_path = base + ".srt"
+                            log.debug("Bazarr sync: derived subtitle path from video: %s", sub_path)
                         else:
+                            log.debug("Bazarr sync: no subtitle path and no video path, skipping item")
                             continue
 
                     # Resolve against MEDIA_ROOT_DIR if not absolute
@@ -327,7 +339,7 @@ async def sync_bazarr_once() -> Dict[str, Any]:
                     # Validate that resolved path stays within MEDIA_ROOT_DIR
                     media_root_real = os.path.realpath(MEDIA_ROOT_DIR)
                     sub_path_real = os.path.realpath(sub_path)
-                    if not sub_path_real.startswith(media_root_real + os.sep) and sub_path_real != media_root_real:
+                    if not _is_safe_path(media_root_real, sub_path_real):
                         log.warning("Bazarr sync: path escapes MEDIA_ROOT_DIR, skipping: %s", sub_path)
                         continue
 
@@ -338,7 +350,7 @@ async def sync_bazarr_once() -> Dict[str, Any]:
                     with open(sub_path, "rb") as fh:
                         content = fh.read()
 
-                    file_hash = md5_of_bytes(content)
+                    file_hash = hash_of_bytes(content)
 
                     # Deduplication by hash
                     existing = conn.execute(
@@ -692,7 +704,7 @@ def subtitle_download(
     # Validate path stays within SUBS_DIR to prevent stored path injection
     subs_root = os.path.realpath(SUBS_DIR)
     file_path_real = os.path.realpath(file_path)
-    if not file_path_real.startswith(subs_root + os.sep) and file_path_real != subs_root:
+    if not _is_safe_path(subs_root, file_path_real):
         raise HTTPException(status_code=403, detail="File path is outside allowed directory")
 
     if not os.path.isfile(file_path_real):
@@ -805,7 +817,7 @@ async def upload_subtitle(
         raise HTTPException(status_code=400, detail="Only .srt files are accepted")
 
     content = await file.read()
-    file_hash = md5_of_bytes(content)
+    file_hash = hash_of_bytes(content)
 
     # Deduplicate
     conn = db_read()
@@ -959,15 +971,15 @@ async def update_subtitle(
         if not file.filename.lower().endswith(".srt"):
             raise HTTPException(status_code=400, detail="Only .srt files accepted")
         content = await file.read()
-        file_hash = md5_of_bytes(content)
+        file_hash = hash_of_bytes(content)
         old_path: str = row["file_path"] or ""
         # Validate old_path before reusing it
         subs_root = os.path.realpath(SUBS_DIR)
         old_path_real = os.path.realpath(old_path) if old_path else ""
         path_safe = (
-            old_path_real
+            bool(old_path_real)
             and os.path.isfile(old_path_real)
-            and (old_path_real.startswith(subs_root + os.sep) or old_path_real == subs_root)
+            and _is_safe_path(subs_root, old_path_real)
         )
         dest_path = old_path_real if path_safe else subtitle_file_path(
             row["imdb_id"] or "unknown",
