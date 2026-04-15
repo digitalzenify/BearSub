@@ -1,3 +1,6 @@
 fastapi
 uvicorn[standard]
-pymysql
+python-dotenv
+python-multipart
+aiohttp
+aiofiles

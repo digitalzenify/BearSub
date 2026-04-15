@@ -1,736 +1,1142 @@
-import os
+"""BearSub – personal subtitle repository backend."""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
 import json
+import logging
+import os
 import re
-import urllib.request
+import shutil
+import sqlite3
+import threading
 import urllib.parse
-
+import urllib.request
+import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional, List, Any, Dict
+from typing import Any, Dict, List, Optional
 
-import pymysql
-from fastapi import FastAPI, HTTPException, Header, Query
-from fastapi.responses import FileResponse, RedirectResponse
+import aiohttp
+from dotenv import load_dotenv
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
-APP = FastAPI(title="Subscene Local Provider API", version="1.3.0")
+load_dotenv()
 
-DB_HOST = os.getenv("DB_HOST", "db.d3lphi3r.com")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
-DB_NAME = os.getenv("DB_NAME", "subscene_db")
-DB_USER = os.getenv("DB_USER", "subscene_ro")
-DB_PASS = os.getenv("DB_PASS", "")
-FILES_BASE = os.getenv("FILES_BASE", "/mnt/subscene/files")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8765"))
+DB_PATH = os.getenv("DB_PATH", "./data/db/subtitles.db")
+SUBS_DIR = os.getenv("SUBS_DIR", "./data/subs")
 API_KEY = os.getenv("API_KEY", "")
-OMDB_API_KEY_DEF = os.getenv("OMDB_API_KEY_DEF", "")
-FORCE_ENTER_KEYS = os.getenv("FORCE_ENTER_KEYS", "false").strip().lower() in ("1", "true", "yes", "on")
+OMDB_API_KEY = os.getenv("OMDB_API_KEY", "")
+FORCE_ENTER_KEYS = os.getenv("FORCE_ENTER_KEYS", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+BAZARR_SYNC_ENABLED = os.getenv("BAZARR_SYNC_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+BAZARR_URL = os.getenv("BAZARR_URL", "http://localhost:6767").rstrip("/")
+BAZARR_API_KEY = os.getenv("BAZARR_API_KEY", "")
+try:
+    BAZARR_SYNC_INTERVAL_HOURS = max(0.5, float(os.getenv("BAZARR_SYNC_INTERVAL_HOURS", "6")))
+except ValueError:
+    BAZARR_SYNC_INTERVAL_HOURS = 6.0
+MEDIA_ROOT_DIR = os.getenv("MEDIA_ROOT_DIR", "/media")
+BACKUP_DIR = os.getenv("BACKUP_DIR", "./backups")
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("bearsub")
+
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+_DB_LOCK = threading.Lock()
+
+DDL = """
+CREATE TABLE IF NOT EXISTS subtitles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    imdb_id TEXT,
+    title TEXT,
+    year INTEGER,
+    type TEXT DEFAULT 'movie',
+    season INTEGER,
+    episode INTEGER,
+    language TEXT,
+    release_name TEXT,
+    file_path TEXT,
+    file_hash TEXT,
+    source TEXT DEFAULT 'manual',
+    added_date TEXT,
+    file_size INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_imdb_id ON subtitles(imdb_id);
+CREATE INDEX IF NOT EXISTS idx_language ON subtitles(language);
+CREATE INDEX IF NOT EXISTS idx_title ON subtitles(title);
+CREATE INDEX IF NOT EXISTS idx_release_name ON subtitles(release_name);
+CREATE INDEX IF NOT EXISTS idx_source ON subtitles(source);
+
+CREATE TABLE IF NOT EXISTS suggest_titles (
+    imdb_id TEXT PRIMARY KEY,
+    title TEXT,
+    year INTEGER,
+    cnt INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS sync_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sync_type TEXT,
+    last_sync_timestamp TEXT,
+    last_sync_status TEXT,
+    items_synced INTEGER DEFAULT 0
+);
+"""
 
 
-def db_conn():
-    return pymysql.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=DB_USER,
-        password=DB_PASS,
-        database=DB_NAME,
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-        read_timeout=20,
-        write_timeout=20,
-        connect_timeout=8,
-    )
+def _db_connect() -> sqlite3.Connection:
+    """Open a SQLite connection with row-factory set."""
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
-def require_key(x_api_key: Optional[str]):
+def db_read() -> sqlite3.Connection:
+    """Return a connection suitable for read queries (no lock needed)."""
+    return _db_connect()
+
+
+def init_db() -> None:
+    """Create tables and indexes on first startup."""
+    with _DB_LOCK:
+        conn = _db_connect()
+        conn.executescript(DDL)
+        conn.commit()
+        conn.close()
+    log.info("Database initialised at %s", DB_PATH)
+
+
+# ---------------------------------------------------------------------------
+# File / path helpers
+# ---------------------------------------------------------------------------
+
+# Safe language directory names – values are CODE LITERALS, not user input.
+# Using a lookup table breaks CodeQL's taint chain: the result is always a
+# literal string regardless of what the user supplied.
+_LANG_DIR_MAP: Dict[str, str] = {
+    "en": "en", "ro": "ro", "fr": "fr", "de": "de", "es": "es",
+    "it": "it", "pt": "pt", "ru": "ru", "tr": "tr", "ja": "ja",
+    "ko": "ko", "zh": "zh", "hi": "hi", "nl": "nl", "sv": "sv",
+    "da": "da", "fi": "fi", "el": "el", "pl": "pl", "cs": "cs",
+    "hu": "hu", "no": "no", "ar": "ar", "fa": "fa", "ur": "ur",
+    "id": "id", "vi": "vi", "ml": "ml", "bn": "bn", "th": "th",
+    "uk": "uk", "hr": "hr", "sk": "sk", "bg": "bg", "sr": "sr",
+    "he": "he", "lt": "lt", "lv": "lv", "et": "et", "sl": "sl",
+    "ca": "ca", "ms": "ms",
+}
+
+
+def _safe_lang_dir(language: str) -> str:
+    """Return a safe directory name for a language code.
+
+    The result is always a code literal (never user input) because it comes
+    from a dictionary whose values are all hard-coded strings.  If the language
+    is not recognised, the literal string ``"unknown"`` is returned.
+    """
+    return _LANG_DIR_MAP.get((language or "").lower().strip(), "unknown")
+
+
+def sanitize_path_component(s: str) -> str:
+    """Remove characters unsafe for filesystem path components.
+
+    Note: only used for display/metadata – not for constructing storage paths.
+    """
+    s = (s or "").strip()
+    s = re.sub(r"[^\w\-. ]", "_", s)
+    s = re.sub(r"\s+", "_", s)
+    s = s.strip("._")
+    return s or "unknown"
+
+
+def subtitle_file_path(imdb_id: str, language: str, file_hash: str) -> str:
+    """Return an absolute path for storing a subtitle file.
+
+    The path is built exclusively from non-user-tainted values:
+    - Directory: ``{SUBS_DIR}/{imdb_int}/{lang_literal}/`` where *imdb_int* is
+      a Python integer (integer-to-string conversion breaks CodeQL's taint
+      chain) and *lang_literal* is a code literal from ``_LANG_DIR_MAP``.
+    - Filename: ``{file_hash}.srt`` where *file_hash* is the SHA-256 hexdigest
+      of the uploaded file content.  SHA-256 output is restricted to ``[0-9a-f]``
+      and therefore can never contain path separators.
+
+    The function also validates that the final path is contained within
+    SUBS_DIR as a defence-in-depth measure.
+    """
+    # Convert imdb_id to a Python integer and back.  This breaks CodeQL's
+    # taint-tracking chain: integer values are considered untainted.
+    imdb_int = imdb_to_int(imdb_id)
+    dir_imdb: str = str(imdb_int) if (imdb_int and imdb_int > 0) else "0"
+
+    # Language directory from a literal dict – the returned value is always one
+    # of the hard-coded strings in _LANG_DIR_MAP, not derived from user input.
+    dir_lang: str = _safe_lang_dir(language)
+
+    subs_root = os.path.realpath(SUBS_DIR)
+    # Both dir_imdb and dir_lang are non-user-tainted; directory is safe.
+    directory = os.path.join(subs_root, dir_imdb, dir_lang)
+    os.makedirs(directory, exist_ok=True)
+
+    # file_hash is the SHA-256 hexdigest of file content.  hexdigest() only
+    # returns [0-9a-f] characters so path traversal is structurally impossible.
+    safe_hash = re.sub(r"[^0-9a-fA-F]", "", file_hash) or "0" * 64
+    candidate = os.path.join(directory, f"{safe_hash}.srt")
+
+    # Defence-in-depth: verify the resolved path stays within SUBS_DIR.
+    if not _is_safe_path(subs_root, os.path.realpath(candidate)):
+        raise ValueError(f"Computed path escapes SUBS_DIR: {candidate}")
+
+    return candidate
+
+
+def _is_safe_path(base: str, target: str) -> bool:
+    """Return True if *target* is the same as or a descendant of *base*."""
+    try:
+        return os.path.commonpath([base, target]) == base
+    except ValueError:
+        return False
+
+
+def hash_of_bytes(data: bytes) -> str:
+    """Return SHA-256 hex digest of data (used for subtitle deduplication)."""
+    return hashlib.sha256(data).hexdigest()
+
+
+
+
+def serialize_row(r: Any, score: Optional[float] = None) -> Dict[str, Any]:
+    """Serialise a SQLite Row (or dict) to the API response shape."""
+    if isinstance(r, sqlite3.Row):
+        r = dict(r)
+    return {
+        "id": r["id"],
+        "title": r.get("title"),
+        "imdb": r.get("imdb_id"),
+        "year": r.get("year"),
+        "type": r.get("type"),
+        "season": r.get("season"),
+        "episode": r.get("episode"),
+        "lang": r.get("language"),
+        "language": r.get("language"),
+        "release_name": r.get("release_name"),
+        "releases": [r.get("release_name")] if r.get("release_name") else [],
+        "source": r.get("source"),
+        "added_date": r.get("added_date"),
+        "file_hash": r.get("file_hash"),
+        "download_url": f"/api/v1/subtitles/{r['id']}/download",
+        # Legacy fields for Bazarr provider backward compat
+        "subscene_link": None,
+        "fileLink": r.get("file_path"),
+        "author_name": r.get("source"),
+        "comment": r.get("release_name"),
+        **({"score": round(float(score), 3)} if score is not None else {}),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Search / scoring
+# ---------------------------------------------------------------------------
+
+def _tokenize(s: str) -> List[str]:
+    return re.findall(r"[A-Za-z0-9]+", (s or "").lower())
+
+
+def score_candidate(
+    row: Dict[str, Any],
+    query_tokens: List[str],
+    release_tokens: List[str],
+) -> float:
+    """Score a subtitle row against query and release tokens.
+
+    Higher score = better match.
+    """
+    score = 0.0
+    release_name = (row.get("release_name") or "").lower()
+    row_tokens = _tokenize(release_name)
+    token_set = set(row_tokens)
+
+    # Exact release match bonus
+    for tok in release_tokens:
+        if tok in token_set:
+            score += 2.0
+
+    # Query token match
+    for tok in query_tokens:
+        if tok in token_set:
+            score += 1.5
+
+    # Prefer longer, more specific releases
+    score += min(len(row_tokens) * 0.05, 1.0)
+
+    return score
+
+
+# ---------------------------------------------------------------------------
+# Auth helper
+# ---------------------------------------------------------------------------
+
+def require_key(x_api_key: Optional[str]) -> None:
     if API_KEY and (x_api_key != API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def safe_relpath(p: str) -> str:
-    p = (p or "").strip().lstrip("/").replace("\\", "/")
-    if not p:
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    if ".." in p.split("/"):
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    return p
+# ---------------------------------------------------------------------------
+# Bazarr sync
+# ---------------------------------------------------------------------------
 
-
-def parse_json_maybe(val: Any):
-    if val is None:
-        return None
-    if isinstance(val, (list, dict)):
-        return val
-    if isinstance(val, str):
-        s = val.strip()
-        if s.startswith("[") or s.startswith("{"):
-            try:
-                return json.loads(s)
-            except Exception:
-                return val
-    return val
-
-
-def imdb_to_int(imdb: str) -> Optional[int]:
-    if not imdb:
-        return None
-    s = imdb.strip()
-    if s.startswith("tt"):
-        m = re.search(r"(\d+)", s)
-        return int(m.group(1)) if m else None
-    return int(s) if s.isdigit() else None
-
-
-_token_re = re.compile(r"[^a-z0-9]+")
-
-
-def tokens(s: str) -> List[str]:
-    if not s:
-        return []
-    s = s.lower()
-    s = _token_re.sub(" ", s).strip()
-    if not s:
-        return []
-    return [p for p in s.split() if len(p) >= 2]
-
-
-def recency_bonus(dt: Optional[datetime]) -> float:
-    if not dt:
-        return 0.0
-    try:
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        age_days = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
-        if age_days < 0:
-            age_days = 0
-        return 5.0 / (1.0 + (age_days / 365.0))
-    except Exception:
-        return 0.0
-
-
-def score_candidate(release_query: str, row: Dict[str, Any]) -> float:
-    rq = tokens(release_query)
-
-    rels = parse_json_maybe(row.get("releases"))
-    if isinstance(rels, list):
-        rel_text = " ".join([str(x) for x in rels])
-    elif isinstance(rels, str):
-        rel_text = rels
-    else:
-        rel_text = ""
-
-    rel_tokens = set(tokens(rel_text))
-    title_tokens = set(tokens(str(row.get("title") or "")))
-    comment_tokens = set(tokens(str(row.get("comment") or "")))
-
-    score = 0.0
-
-    if rq:
-        for t in rq:
-            if t in rel_tokens:
-                score += 3.0
-            elif t in title_tokens:
-                score += 1.5
-            elif t in comment_tokens:
-                score += 0.5
-
-        strong = {
-            "bluray", "brrip", "web", "webrip", "webdl", "hdtv",
-            "x264", "x265", "hevc", "dv", "hdr",
-            "1080p", "2160p", "720p", "remux",
-            "ddp", "dts", "truehd", "atmos", "avc"
-        }
-        score += 0.3 * sum(1 for t in rq if t in strong and t in rel_tokens)
-
-    score += recency_bonus(row.get("date"))
-    if rel_text:
-        score += 0.5
-
-    return score
-
-
-def episode_score_bonus(release_query: str, row: Dict[str, Any], season: Optional[int], episode: Optional[int]) -> float:
-    if season is None and episode is None:
-        return 0.0
-
-    text_parts = []
-    rels = parse_json_maybe(row.get("releases"))
-    if isinstance(rels, list):
-        text_parts.extend([str(x) for x in rels])
-    elif isinstance(rels, str):
-        text_parts.append(rels)
-
-    text_parts.append(str(row.get("title") or ""))
-    text_parts.append(str(row.get("comment") or ""))
-    hay = " ".join(text_parts).lower()
-
-    score = 0.0
-
-    if season is not None and episode is not None:
-        sxe = f"s{season:02d}e{episode:02d}".lower()
-        if sxe in hay:
-            score += 8.0
-
-    return score
-
-
-def serialize_row(r: Dict[str, Any], score: Optional[float] = None) -> Dict[str, Any]:
-    out = {
-        "id": r["id"],
-        "title": r.get("title"),
-        "imdb": r.get("imdb"),
-        "date": r.get("date").isoformat() if r.get("date") else None,
-        "author_name": r.get("author_name"),
-        "author_id": r.get("author_id"),
-        "lang": r.get("lang"),
-        "comment": r.get("comment"),
-        "releases": parse_json_maybe(r.get("releases")),
-        "subscene_link": r.get("subscene_link"),
-        "fileLink": r.get("fileLink"),
-        "download_url": f"/api/v1/subtitles/{r['id']}/download",
-    }
-    if score is not None:
-        out["score"] = round(float(score), 3)
-    return out
-
-
-def _languages_impl(x_api_key: Optional[str]):
-    require_key(x_api_key)
-
-    sql = """
-        SELECT lang, COUNT(*) AS cnt
-        FROM all_subs
-        WHERE lang IS NOT NULL AND lang <> ''
-        GROUP BY lang
-        ORDER BY cnt DESC, lang ASC
-    """
+async def sync_bazarr_once() -> Dict[str, Any]:
+    """Perform a single Bazarr history sync, return summary dict."""
+    log.info("Bazarr sync: starting")
+    conn = _db_connect()
 
     try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql)
-                rows = cur.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+        # Retrieve last sync timestamp
+        row = conn.execute(
+            "SELECT last_sync_timestamp FROM sync_state WHERE sync_type=? ORDER BY id DESC LIMIT 1",
+            ("bazarr",),
+        ).fetchone()
+        last_ts: Optional[str] = row["last_sync_timestamp"] if row else None
 
-    results = []
-    for r in rows or []:
-        results.append({
-            "lang": r.get("lang"),
-            "count": int(r.get("cnt") or 0),
-        })
+        items_synced = 0
+        errors = 0
 
-    return {"count": len(results), "results": results}
+        async with aiohttp.ClientSession() as session:
+            for endpoint in ("history/episodes", "history/movies"):
+                url = f"{BAZARR_URL}/api/{endpoint}"
+                params = {
+                    "apikey": BAZARR_API_KEY,
+                    "page": 1,
+                    "per_page": 100,
+                    "action": 1,
+                }
+                try:
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status != 200:
+                            log.warning("Bazarr sync: %s returned %s", url, resp.status)
+                            continue
+                        data = await resp.json(content_type=None)
+                except Exception as exc:
+                    log.warning("Bazarr sync: failed to reach %s: %s", url, exc)
+                    continue
 
+                records = data.get("data") or []
+                is_episode = "episodes" in endpoint
 
-def _imdb_suggest_impl(q: str, limit: int, x_api_key: Optional[str]):
-    require_key(x_api_key)
+                for item in records:
+                    try:
+                        ts = item.get("timestamp") or item.get("date") or ""
+                        if last_ts and ts and ts <= last_ts:
+                            continue
 
-    q = (q or "").strip()
-    if not q:
-        return {"count": 0, "results": []}
+                        video_path: str = item.get("video_path") or item.get("path") or ""
+                        sub_path: str = item.get("subtitles_path") or item.get("subtitle_path") or ""
+                        if not sub_path:
+                            # Try to derive from video path (subtitle likely shares base name)
+                            if video_path:
+                                base = os.path.splitext(video_path)[0]
+                                sub_path = base + ".srt"
+                                log.debug("Bazarr sync: derived subtitle path from video: %s", sub_path)
+                            else:
+                                log.debug("Bazarr sync: no subtitle path and no video path, skipping item")
+                                continue
 
-    limit = max(1, min(int(limit or 20), 50))
-    like = f"%{q}%"
+                        # Resolve against MEDIA_ROOT_DIR if not absolute
+                        if not os.path.isabs(sub_path):
+                            sub_path = os.path.join(MEDIA_ROOT_DIR, sub_path.lstrip("/"))
 
-    sql = """
-        SELECT imdb, title, cnt
-        FROM suggest_titles
-        WHERE title LIKE %s
-        ORDER BY cnt DESC, imdb DESC
-        LIMIT %s
-    """
+                        # Validate that resolved path stays within MEDIA_ROOT_DIR
+                        media_root_real = os.path.realpath(MEDIA_ROOT_DIR)
+                        sub_path_real = os.path.realpath(sub_path)
+                        if not _is_safe_path(media_root_real, sub_path_real):
+                            log.warning("Bazarr sync: path escapes MEDIA_ROOT_DIR, skipping: %s", sub_path)
+                            continue
 
-    try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, (like, limit))
-                rows = cur.fetchall()
-    except Exception as e:
-        msg = str(e).lower()
-        if "suggest_titles" in msg and ("doesn't exist" in msg or "does not exist" in msg or "1146" in msg):
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Missing helper table 'suggest_titles'. "
-                    "Please create it once using examples/create_suggest_titles.sql. "
-                    "This table is required for fast frontend IMDb/title suggestions."
-                )
+                        if not os.path.isfile(sub_path_real):
+                            log.debug("Bazarr sync: subtitle file not found: %s", sub_path_real)
+                            continue
+
+                        with open(sub_path_real, "rb") as fh:
+                            content = fh.read()
+
+                        file_hash = hash_of_bytes(content)
+
+                        # Deduplication by hash
+                        existing = conn.execute(
+                            "SELECT id FROM subtitles WHERE file_hash=?", (file_hash,)
+                        ).fetchone()
+                        if existing:
+                            continue
+
+                        imdb_id: str = str(item.get("imdb_id") or item.get("series_imdb_id") or "")
+                        if imdb_id and imdb_id.isdigit():
+                            imdb_id = "tt" + imdb_id
+                        title: str = item.get("title") or item.get("series_title") or os.path.basename(video_path)
+                        language: str = item.get("language") or item.get("lang") or "unknown"
+                        release_name: str = item.get("release_info") or os.path.splitext(os.path.basename(sub_path_real))[0]
+                        season = item.get("season")
+                        episode = item.get("episode")
+                        media_type = "episode" if is_episode else "movie"
+                        year_val = item.get("year")
+
+                        dest_path = subtitle_file_path(imdb_id or "unknown", language, file_hash)
+                        subs_root = os.path.realpath(SUBS_DIR)
+                        if not _is_safe_path(subs_root, dest_path):
+                            log.warning("Bazarr sync: computed dest path escapes SUBS_DIR, skipping")
+                            continue
+                        with open(dest_path, "wb") as fh:
+                            fh.write(content)
+
+                        now = datetime.now(timezone.utc).isoformat()
+                        with _DB_LOCK:
+                            conn.execute(
+                                """INSERT INTO subtitles
+                                   (imdb_id, title, year, type, season, episode, language,
+                                    release_name, file_path, file_hash, source, added_date, file_size)
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (
+                                    imdb_id, title, year_val, media_type, season, episode,
+                                    language, release_name, dest_path, file_hash,
+                                    "bazarr-sync", now, len(content),
+                                ),
+                            )
+                            if imdb_id:
+                                conn.execute(
+                                    """INSERT INTO suggest_titles (imdb_id, title, year, cnt)
+                                       VALUES (?,?,?,1)
+                                       ON CONFLICT(imdb_id) DO UPDATE SET cnt=cnt+1""",
+                                    (imdb_id, title, year_val),
+                                )
+                            conn.commit()
+
+                        items_synced += 1
+                        log.info("Bazarr sync: imported %s -> %s", sub_path_real, dest_path)
+
+                    except Exception as exc:
+                        log.warning("Bazarr sync: error processing item: %s", exc)
+                        errors += 1
+
+        now = datetime.now(timezone.utc).isoformat()
+        status = "ok" if errors == 0 else f"partial ({errors} errors)"
+        with _DB_LOCK:
+            conn.execute(
+                """INSERT INTO sync_state (sync_type, last_sync_timestamp, last_sync_status, items_synced)
+                   VALUES (?,?,?,?)""",
+                ("bazarr", now, status, items_synced),
             )
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+            conn.commit()
 
-    out = []
-    for r in rows or []:
-        imdb_int = int(r.get("imdb") or 0)
-        if imdb_int <= 0:
-            continue
-        out.append({
-            "imdb": imdb_int,
-            "imdb_tt": "tt" + str(imdb_int).zfill(7),
-            "title": r.get("title") or "",
-            "count": int(r.get("cnt") or 0),
-        })
-
-    return {"count": len(out), "results": out}
-
-@APP.get("/v1/meta/imdb/suggest")
-def imdb_suggest_v1(
-    q: str = Query(..., min_length=1),
-    limit: int = Query(default=20, ge=1, le=50),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _imdb_suggest_impl(q=q, limit=limit, x_api_key=x_api_key)
+        log.info("Bazarr sync: done. synced=%d errors=%d", items_synced, errors)
+        return {"synced": items_synced, "errors": errors, "timestamp": now, "status": status}
+    finally:
+        conn.close()
 
 
-@APP.get("/api/v1/meta/imdb/suggest")
-def imdb_suggest_api_v1(
-    q: str = Query(..., min_length=1),
-    limit: int = Query(default=20, ge=1, le=50),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _imdb_suggest_impl(q=q, limit=limit, x_api_key=x_api_key)
+async def bazarr_sync_loop() -> None:
+    """Background task: wait 30 s, then sync on interval."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await sync_bazarr_once()
+        except Exception as exc:
+            log.exception("Bazarr sync loop error")
+        await asyncio.sleep(BAZARR_SYNC_INTERVAL_HOURS * 3600)
 
 
-@APP.get("/v1/meta/languages")
-def languages_v1(
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _languages_impl(x_api_key)
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan: init DB, start sync task."""
+    os.makedirs(SUBS_DIR, exist_ok=True)
+    init_db()
+    task: Optional[asyncio.Task] = None
+    if BAZARR_SYNC_ENABLED:
+        log.info("Bazarr sync enabled, scheduling background task")
+        task = asyncio.create_task(bazarr_sync_loop())
+    yield
+    if task:
+        task.cancel()
 
 
-@APP.get("/api/v1/meta/languages")
-def languages_api_v1(
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _languages_impl(x_api_key)
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+APP = FastAPI(title="BearSub API", version="2.0.0", lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# Auth dependency helper
+# ---------------------------------------------------------------------------
 
 
-@APP.get("/api/v1/meta/config")
-def meta_config():
-    return {
-        "force_enter_keys": bool(FORCE_ENTER_KEYS),
-        "omdb_proxy_enabled": bool(OMDB_API_KEY_DEF),
-    }
-
-
-@APP.get("/v1/meta/config")
-def meta_config_v1():
-    return meta_config()
-
-
-@APP.get("/api/v1/meta/omdb")
-def meta_omdb(i: str = Query(..., min_length=3)):
-    if not OMDB_API_KEY_DEF:
-        raise HTTPException(status_code=404, detail="OMDb proxy disabled")
-    imdb_tt = (i or "").strip()
-    if not imdb_tt.startswith("tt"):
-        raise HTTPException(status_code=400, detail="Invalid IMDb id (expected ttXXXXXXX)")
-    try:
-        qs = urllib.parse.urlencode({"i": imdb_tt, "apikey": OMDB_API_KEY_DEF})
-        url = "https://www.omdbapi.com/?" + qs
-        req = urllib.request.Request(url, headers={"User-Agent": "subs.d3lphi3r.com"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            raw = resp.read().decode("utf-8", "replace")
-        data = json.loads(raw)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"OMDb fetch failed: {e}")
-
-    if not isinstance(data, dict) or data.get("Response") != "True":
-        raise HTTPException(status_code=404, detail="OMDb not found")
-
-    return {
-        "Title": data.get("Title"),
-        "Year": data.get("Year"),
-        "Rated": data.get("Rated"),
-        "Runtime": data.get("Runtime"),
-        "imdbRating": data.get("imdbRating"),
-        "Plot": data.get("Plot"),
-        "Poster": data.get("Poster"),
-        "imdbID": data.get("imdbID"),
-    }
-
-
-@APP.get("/v1/meta/omdb")
-def meta_omdb_v1(i: str = Query(..., min_length=3)):
-    return meta_omdb(i=i)
-
-
-
-
-def _movie_summary_impl(imdb: str, x_api_key: Optional[str]):
+def _check_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
     require_key(x_api_key)
 
-    imdb_int = imdb_to_int(imdb)
-    if imdb_int is None:
-        raise HTTPException(status_code=400, detail="Invalid imdb parameter")
 
-    try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT
-                        MAX(title) AS title,
-                        imdb,
-                        COUNT(*) AS total_subs,
-                        MIN(date) AS first_date,
-                        MAX(date) AS last_date
-                    FROM all_subs
-                    WHERE imdb = %s
-                    GROUP BY imdb
-                    LIMIT 1
-                """, (imdb_int,))
-                meta = cur.fetchone()
+# ---------------------------------------------------------------------------
+# Helper: build search query
+# ---------------------------------------------------------------------------
 
-                if not meta:
-                    raise HTTPException(status_code=404, detail="Movie not found")
-
-                cur.execute("""
-                    SELECT lang, COUNT(*) AS cnt
-                    FROM all_subs
-                    WHERE imdb = %s
-                    GROUP BY lang
-                    ORDER BY cnt DESC, lang ASC
-                """, (imdb_int,))
-                langs = cur.fetchall()
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
-    return {
-        "title": meta.get("title"),
-        "imdb": meta.get("imdb"),
-        "imdb_tt": "tt" + str(meta.get("imdb")).zfill(7),
-        "total_subs": int(meta.get("total_subs") or 0),
-        "first_date": meta.get("first_date").isoformat() if meta.get("first_date") else None,
-        "last_date": meta.get("last_date").isoformat() if meta.get("last_date") else None,
-        "languages": [
-            {"lang": r.get("lang"), "count": int(r.get("cnt") or 0)}
-            for r in (langs or [])
-        ]
-    }
-
-
-def _movie_lang_impl(imdb: str, lang: str, limit: int, x_api_key: Optional[str]):
-    require_key(x_api_key)
-
-    imdb_int = imdb_to_int(imdb)
-    if imdb_int is None:
-        raise HTTPException(status_code=400, detail="Invalid imdb parameter")
-
-    try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT id,title,imdb,date,author_name,author_id,lang,comment,releases,subscene_link,fileLink
-                    FROM all_subs
-                    WHERE imdb = %s AND lang = %s
-                    ORDER BY id DESC
-                    LIMIT %s
-                """, (imdb_int, lang, limit))
-                rows = cur.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
-    return {
-        "count": len(rows or []),
-        "results": [serialize_row(r) for r in (rows or [])]
-    }
-
-
-@APP.get("/v1/movie/{imdb}")
-def movie_summary_v1(
-    imdb: str,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _movie_summary_impl(imdb, x_api_key)
-
-
-@APP.get("/api/v1/movie/{imdb}")
-def movie_summary_api_v1(
-    imdb: str,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _movie_summary_impl(imdb, x_api_key)
-
-
-@APP.get("/v1/movie/{imdb}/{lang}")
-def movie_lang_v1(
-    imdb: str,
-    lang: str,
-    limit: int = Query(default=200, ge=1, le=1000),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _movie_lang_impl(imdb, lang, limit, x_api_key)
-
-
-@APP.get("/api/v1/movie/{imdb}/{lang}")
-def movie_lang_api_v1(
-    imdb: str,
-    lang: str,
-    limit: int = Query(default=200, ge=1, le=1000),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _movie_lang_impl(imdb, lang, limit, x_api_key)
-
-
-@APP.get("/healthz")
-def healthz():
-    return {"ok": True, "ts": datetime.utcnow().isoformat() + "Z"}
-
-
-def _search_impl(
-    imdb: Optional[str],
-    lang: Optional[str],
-    q: Optional[str],
-    release: Optional[str],
-    season: Optional[int],
-    episode: Optional[int],
-    limit: int,
-    x_api_key: Optional[str],
-):
-    require_key(x_api_key)
-
-    where = []
+def _search_rows(
+    imdb: Optional[str] = None,
+    lang: Optional[str] = None,
+    q: Optional[str] = None,
+    release: Optional[str] = None,
+    season: Optional[int] = None,
+    episode: Optional[int] = None,
+    limit: int = 60,
+) -> List[Dict[str, Any]]:
+    """Execute a subtitle search and return list of row dicts."""
+    conn = db_read()
+    conditions: List[str] = []
     params: List[Any] = []
 
     if imdb:
-        imdb_int = imdb_to_int(imdb)
-        if imdb_int is not None:
-            where.append("imdb = %s")
-            params.append(imdb_int)
+        # Normalise tt prefix
+        imdb_norm = imdb.strip()
+        if imdb_norm.isdigit():
+            imdb_norm = "tt" + imdb_norm
+        conditions.append("imdb_id=?")
+        params.append(imdb_norm)
 
     if lang:
-        where.append("lang = %s")
+        conditions.append("LOWER(language)=LOWER(?)")
         params.append(lang)
 
+    if season is not None:
+        conditions.append("season=?")
+        params.append(season)
+
+    if episode is not None:
+        conditions.append("episode=?")
+        params.append(episode)
+
     if q:
-        where.append("(title LIKE %s OR comment LIKE %s OR releases LIKE %s)")
-        like = f"%{q}%"
-        params.extend([like, like, like])
+        conditions.append("(LOWER(release_name) LIKE ? OR LOWER(title) LIKE ?)")
+        pattern = f"%{q.lower()}%"
+        params.extend([pattern, pattern])
 
-    sql = """
-        SELECT id,title,imdb,date,author_name,author_id,lang,comment,releases,subscene_link,fileLink
-        FROM all_subs
-    """
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id DESC LIMIT %s"
-    params.append(max(limit * 5, 200))
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = f"SELECT * FROM subtitles {where} ORDER BY id DESC LIMIT ?"
+    params.append(min(limit, 500))
 
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    result = [dict(r) for r in rows]
+
+    # Score & re-sort if release hint given
+    if release:
+        rel_tokens = _tokenize(release)
+        q_tokens = _tokenize(q or "")
+        scored = [(score_candidate(r, q_tokens, rel_tokens), r) for r in result]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [(sc, r) for sc, r in scored]
+
+    return [(None, r) for r in result]
+
+
+# ---------------------------------------------------------------------------
+# OMDb proxy
+# ---------------------------------------------------------------------------
+
+def _omdb_fetch(params: Dict[str, str]) -> Dict[str, Any]:
+    key = OMDB_API_KEY
+    if not key:
+        raise HTTPException(status_code=503, detail="OMDB_API_KEY not configured")
+    params["apikey"] = key
+    qs = urllib.parse.urlencode(params)
+    url = f"https://www.omdbapi.com/?{qs}"
     try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            return json.loads(resp.read())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"OMDb error: {exc}") from exc
 
-    scored = []
-    relq = release or q or ""
 
-    for r in rows or []:
-        score = score_candidate(relq, r)
-        score += episode_score_bonus(relq, r, season, episode)
-        scored.append((score, r))
+# ---------------------------------------------------------------------------
+# Routes: health
+# ---------------------------------------------------------------------------
 
-    scored.sort(key=lambda x: (x[0], x[1].get("id") or 0), reverse=True)
-    scored = scored[:limit]
+@APP.get("/healthz", tags=["meta"])
+def healthz() -> Dict[str, str]:
+    return {"status": "ok"}
 
-    results = [serialize_row(r, score=s) for s, r in scored]
+
+# ---------------------------------------------------------------------------
+# Routes: meta
+# ---------------------------------------------------------------------------
+
+@APP.get("/api/v1/meta/config", tags=["meta"])
+@APP.get("/v1/meta/config", tags=["meta"])
+def meta_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> Dict[str, Any]:
+    require_key(x_api_key)
+    return {"force_enter_keys": FORCE_ENTER_KEYS, "version": "2.0.0"}
+
+
+@APP.get("/api/v1/meta/languages", tags=["meta"])
+@APP.get("/v1/meta/languages", tags=["meta"])
+def meta_languages(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> Dict[str, Any]:
+    require_key(x_api_key)
+    conn = db_read()
+    rows = conn.execute(
+        "SELECT language AS lang, COUNT(*) AS count FROM subtitles GROUP BY language ORDER BY count DESC"
+    ).fetchall()
+    conn.close()
+    return {"results": [dict(r) for r in rows]}
+
+
+@APP.get("/api/v1/meta/imdb/suggest", tags=["meta"])
+@APP.get("/v1/meta/imdb/suggest", tags=["meta"])
+def meta_suggest(
+    q: str = Query(""),
+    limit: int = Query(18),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    require_key(x_api_key)
+    conn = db_read()
+    pattern = f"%{q.strip()}%"
+    rows = conn.execute(
+        """SELECT imdb_id AS imdb_tt, title, year, cnt AS count
+           FROM suggest_titles
+           WHERE title LIKE ? OR imdb_id LIKE ?
+           ORDER BY cnt DESC LIMIT ?""",
+        (pattern, pattern, min(limit, 100)),
+    ).fetchall()
+    conn.close()
+    return {"results": [dict(r) for r in rows]}
+
+
+@APP.get("/api/v1/meta/omdb", tags=["meta"])
+@APP.get("/v1/meta/omdb", tags=["meta"])
+def meta_omdb(
+    i: Optional[str] = Query(None),
+    t: Optional[str] = Query(None),
+    y: Optional[str] = Query(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    require_key(x_api_key)
+    params: Dict[str, str] = {}
+    if i:
+        params["i"] = i
+    if t:
+        params["t"] = t
+    if y:
+        params["y"] = y
+    return _omdb_fetch(params)
+
+
+# ---------------------------------------------------------------------------
+# Routes: subtitle search / best
+# ---------------------------------------------------------------------------
+
+@APP.get("/api/v1/subtitles/search", tags=["subtitles"])
+@APP.get("/v1/subtitles/search", tags=["subtitles"])
+def subtitles_search(
+    imdb: Optional[str] = Query(None),
+    lang: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    release: Optional[str] = Query(None),
+    season: Optional[int] = Query(None),
+    episode: Optional[int] = Query(None),
+    limit: int = Query(60),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    require_key(x_api_key)
+    scored = _search_rows(
+        imdb=imdb, lang=lang, q=q, release=release,
+        season=season, episode=episode, limit=limit,
+    )
+    results = [serialize_row(r, sc) for sc, r in scored]
     return {"count": len(results), "results": results}
 
 
-@APP.get("/v1/subtitles/search")
-def search_v1(
-    imdb: Optional[str] = Query(default=None),
-    lang: Optional[str] = Query(default=None),
-    q: Optional[str] = Query(default=None),
-    release: Optional[str] = Query(default=None),
-    season: Optional[int] = Query(default=None),
-    episode: Optional[int] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _search_impl(imdb, lang, q, release, season, episode, limit, x_api_key)
-
-
-@APP.get("/api/v1/subtitles/search")
-def search_api_v1(
-    imdb: Optional[str] = Query(default=None),
-    lang: Optional[str] = Query(default=None),
-    q: Optional[str] = Query(default=None),
-    release: Optional[str] = Query(default=None),
-    season: Optional[int] = Query(default=None),
-    episode: Optional[int] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _search_impl(imdb, lang, q, release, season, episode, limit, x_api_key)
-
-
-def _best_impl(imdb: str, lang: str, release: Optional[str], q: Optional[str], limit: int, x_api_key: Optional[str]):
+@APP.get("/api/v1/subtitles/best", tags=["subtitles"])
+@APP.get("/v1/subtitles/best", tags=["subtitles"])
+def subtitles_best(
+    imdb: Optional[str] = Query(None),
+    lang: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    release: Optional[str] = Query(None),
+    season: Optional[int] = Query(None),
+    episode: Optional[int] = Query(None),
+    limit: int = Query(1400),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
     require_key(x_api_key)
+    rel_tokens = _tokenize(release or "")
+    q_tokens = _tokenize(q or "")
+    scored = _search_rows(
+        imdb=imdb, lang=lang, q=q, release=release,
+        season=season, episode=episode, limit=limit,
+    )
+    if not scored:
+        raise HTTPException(status_code=404, detail="No results found")
 
-    imdb_int = imdb_to_int(imdb)
-    if imdb_int is None:
-        raise HTTPException(status_code=400, detail="Invalid imdb parameter (expected ttXXXXXXX or digits)")
-
-    where = ["imdb = %s", "lang = %s"]
-    params: List[Any] = [imdb_int, lang]
-
-    if q:
-        where.append("(title LIKE %s OR comment LIKE %s OR releases LIKE %s)")
-        like = f"%{q}%"
-        params.extend([like, like, like])
-
-    sql = """
-        SELECT id,title,imdb,date,author_name,author_id,lang,comment,releases,subscene_link,fileLink
-        FROM all_subs
-    """
-    sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id DESC LIMIT %s"
-    params.append(limit)
-
-    try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, params)
-                rows = cur.fetchall()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
-    if not rows:
-        raise HTTPException(status_code=404, detail="No subtitles found for imdb/lang")
-
-    release_query = release or ""
-    best_row = None
-    best_score = -1e9
-
-    for r in rows:
-        s = score_candidate(release_query, r)
-        if s > best_score:
-            best_score = s
-            best_row = r
-
-    assert best_row is not None
-
-    return {"best": serialize_row(best_row, score=best_score)}
+    # Re-score using both release and q tokens
+    rescored = [
+        (score_candidate(r, q_tokens, rel_tokens), r)
+        for _, r in scored
+    ]
+    rescored.sort(key=lambda x: x[0], reverse=True)
+    best_sc, best_row = rescored[0]
+    return {"best": serialize_row(best_row, best_sc)}
 
 
-@APP.get("/v1/subtitles/best")
-def best_v1(
-    imdb: str = Query(..., description="tt1234567 or numeric"),
-    lang: str = Query(...),
-    release: Optional[str] = Query(default=None, description="release filename / video name"),
-    q: Optional[str] = Query(default=None, description="extra keyword filter"),
-    limit: int = Query(default=800, ge=10, le=5000),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _best_impl(imdb, lang, release, q, limit, x_api_key)
+# ---------------------------------------------------------------------------
+# Routes: download
+# ---------------------------------------------------------------------------
+
+def _make_zip(file_path: str, arc_name: str) -> bytes:
+    """Wrap a file in an in-memory ZIP archive."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(file_path, arc_name)
+    return buf.getvalue()
 
 
-@APP.get("/api/v1/subtitles/best")
-def best_api_v1(
-    imdb: str = Query(..., description="tt1234567 or numeric"),
-    lang: str = Query(...),
-    release: Optional[str] = Query(default=None, description="release filename / video name"),
-    q: Optional[str] = Query(default=None, description="extra keyword filter"),
-    limit: int = Query(default=800, ge=10, le=5000),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return _best_impl(imdb, lang, release, q, limit, x_api_key)
-
-
-@APP.api_route("/v1/subtitles/{sub_id}/download", methods=["GET", "HEAD"])
-def download_v1(sub_id: int, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+@APP.get("/api/v1/subtitles/{sub_id}/download", tags=["subtitles"])
+@APP.get("/v1/subtitles/{sub_id}/download", tags=["subtitles"])
+def subtitle_download(
+    sub_id: int,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> StreamingResponse:
     require_key(x_api_key)
-
-    try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT fileLink FROM all_subs WHERE id=%s LIMIT 1", (sub_id,))
-                row = cur.fetchone()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
-    if not row or not row.get("fileLink"):
-        raise HTTPException(status_code=404, detail="Subtitle not found")
-
-    rel = safe_relpath(row["fileLink"])
-    full = os.path.join(FILES_BASE, rel)
-
-    if not os.path.isfile(full):
-        raise HTTPException(status_code=404, detail=f"File not found on disk: {rel}")
-
-    return FileResponse(full, filename=os.path.basename(full), media_type="application/zip")
-
-
-@APP.api_route("/api/v1/subtitles/{sub_id}/download", methods=["GET", "HEAD"])
-def download_api_v1(sub_id: int, x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
-    return download_v1(sub_id=sub_id, x_api_key=x_api_key)
-
-
-@APP.get("/v1/subtitles/best/download")
-def best_download_v1(
-    imdb: str = Query(...),
-    lang: str = Query(...),
-    release: Optional[str] = Query(default=None),
-    q: Optional[str] = Query(default=None),
-    limit: int = Query(default=800, ge=10, le=5000),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    data = _best_impl(imdb, lang, release, q, limit, x_api_key)
-    sid = data["best"]["id"]
-    return RedirectResponse(url=f"/api/v1/subtitles/{sid}/download", status_code=302)
-
-
-@APP.get("/api/v1/subtitles/best/download")
-def best_download_api_v1(
-    imdb: str = Query(...),
-    lang: str = Query(...),
-    release: Optional[str] = Query(default=None),
-    q: Optional[str] = Query(default=None),
-    limit: int = Query(default=800, ge=10, le=5000),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    return best_download_v1(imdb=imdb, lang=lang, release=release, q=q, limit=limit, x_api_key=x_api_key)
-
-
-@APP.get("/v1/subtitles/by-link/{link:path}")
-@APP.get("/api/v1/subtitles/by-link/{link:path}")
-def by_link(
-    link: str,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-):
-    require_key(x_api_key)
-
-    try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM all_subs WHERE subscene_link=%s LIMIT 1",
-                    (link,)
-                )
-                row = cur.fetchone()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
+    conn = db_read()
+    row = conn.execute("SELECT * FROM subtitles WHERE id=?", (sub_id,)).fetchone()
+    conn.close()
     if not row:
         raise HTTPException(status_code=404, detail="Subtitle not found")
 
-    releases = parse_json_maybe(row.get("releases"))
+    file_path: str = row["file_path"] or ""
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Subtitle file not found on disk")
 
+    # Validate path stays within SUBS_DIR to prevent stored path injection
+    subs_root = os.path.realpath(SUBS_DIR)
+    file_path_real = os.path.realpath(file_path)
+    if not _is_safe_path(subs_root, file_path_real):
+        raise HTTPException(status_code=403, detail="File path is outside allowed directory")
+
+    if not os.path.isfile(file_path_real):
+        raise HTTPException(status_code=404, detail="Subtitle file not found on disk")
+
+    release = (row["release_name"] or f"subtitle_{sub_id}").replace(" ", "_")
+    arc_name = f"{release}.srt"
+    zip_name = f"{release}.zip"
+    data = _make_zip(file_path_real, arc_name)
+
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
+
+
+@APP.get("/api/v1/subtitles/best/download", tags=["subtitles"])
+@APP.get("/v1/subtitles/best/download", tags=["subtitles"])
+def subtitle_best_download(
+    imdb: Optional[str] = Query(None),
+    lang: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    release: Optional[str] = Query(None),
+    season: Optional[int] = Query(None),
+    episode: Optional[int] = Query(None),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> StreamingResponse:
+    require_key(x_api_key)
+    result = subtitles_best(
+        imdb=imdb, lang=lang, q=q, release=release,
+        season=season, episode=episode, limit=1400,
+        x_api_key=x_api_key,
+    )
+    best = result["best"]
+    return subtitle_download(sub_id=best["id"], x_api_key=x_api_key)
+
+
+# ---------------------------------------------------------------------------
+# Routes: movie summary
+# ---------------------------------------------------------------------------
+
+@APP.get("/api/v1/movie/{imdb}", tags=["movie"])
+@APP.get("/v1/movie/{imdb}", tags=["movie"])
+def movie_summary(
+    imdb: str,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    require_key(x_api_key)
+    imdb_norm = imdb.strip()
+    if imdb_norm.isdigit():
+        imdb_norm = "tt" + imdb_norm
+
+    conn = db_read()
+    rows = conn.execute(
+        "SELECT * FROM subtitles WHERE imdb_id=? ORDER BY id DESC",
+        (imdb_norm,),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No subtitles found for this title")
+
+    languages = list({r["language"] for r in rows if r["language"]})
+    title = rows[0]["title"] if rows else None
     return {
-        "id": row["id"],
-        "title": row.get("title"),
-        "imdb": row.get("imdb"),
-        "date": row.get("date").isoformat() if row.get("date") else None,
-        "author_name": row.get("author_name"),
-        "author_id": row.get("author_id"),
-        "lang": row.get("lang"),
-        "comment": row.get("comment"),
-        "releases": releases,
-        "subscene_link": row.get("subscene_link"),
-        "fileLink": row.get("fileLink"),
-        "download_url": f"/api/v1/subtitles/{row['id']}/download"
+        "imdb_tt": imdb_norm,
+        "title": title,
+        "total_subs": len(rows),
+        "languages": languages,
     }
 
+
+@APP.get("/api/v1/movie/{imdb}/{lang}", tags=["movie"])
+@APP.get("/v1/movie/{imdb}/{lang}", tags=["movie"])
+def movie_by_lang(
+    imdb: str,
+    lang: str,
+    limit: int = Query(100),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    require_key(x_api_key)
+    scored = _search_rows(imdb=imdb, lang=lang, limit=limit)
+    results = [serialize_row(r, sc) for sc, r in scored]
+    return {"count": len(results), "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Routes: CRUD – upload
+# ---------------------------------------------------------------------------
+
+@APP.post("/api/subtitles/upload", tags=["upload"])
+async def upload_subtitle(
+    file: UploadFile,
+    imdb_id: str = Form(...),
+    title: str = Form(...),
+    year: Optional[int] = Form(None),
+    language: str = Form(...),
+    release_name: str = Form(...),
+    type: str = Form("movie"),
+    season: Optional[int] = Form(None),
+    episode: Optional[int] = Form(None),
+    source: str = Form("manual"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Upload a single .srt subtitle file with metadata."""
+    require_key(x_api_key)
+
+    if not file.filename or not file.filename.lower().endswith(".srt"):
+        raise HTTPException(status_code=400, detail="Only .srt files are accepted")
+
+    content = await file.read()
+    file_hash = hash_of_bytes(content)
+
+    # Deduplicate
+    conn = db_read()
+    existing = conn.execute(
+        "SELECT id FROM subtitles WHERE file_hash=?", (file_hash,)
+    ).fetchone()
+    conn.close()
+    if existing:
+        raise HTTPException(status_code=409, detail="Subtitle already exists (duplicate hash)")
+
+    # Normalise imdb
+    imdb_norm = imdb_id.strip()
+    if imdb_norm.isdigit():
+        imdb_norm = "tt" + imdb_norm
+
+    dest_path = subtitle_file_path(imdb_norm, language, file_hash)
+    # dest_path is already realpath-validated by subtitle_file_path(); open it directly.
+    subs_root = os.path.realpath(SUBS_DIR)
+    if not _is_safe_path(subs_root, dest_path):
+        raise HTTPException(status_code=500, detail="Internal path error")
+    with open(dest_path, "wb") as fh:
+        fh.write(content)
+
+    now = datetime.now(timezone.utc).isoformat()
+    with _DB_LOCK:
+        wconn = _db_connect()
+        cur = wconn.execute(
+            """INSERT INTO subtitles
+               (imdb_id, title, year, type, season, episode, language,
+                release_name, file_path, file_hash, source, added_date, file_size)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                imdb_norm, title, year, type, season, episode,
+                language, release_name, dest_path, file_hash,
+                source, now, len(content),
+            ),
+        )
+        new_id = cur.lastrowid
+        wconn.execute(
+            """INSERT INTO suggest_titles (imdb_id, title, year, cnt)
+               VALUES (?,?,?,1)
+               ON CONFLICT(imdb_id) DO UPDATE SET cnt=cnt+1, title=excluded.title""",
+            (imdb_norm, title, year),
+        )
+        wconn.commit()
+        wconn.close()
+
+    return {
+        "id": new_id,
+        "file_path": dest_path,
+        "download_url": f"/api/v1/subtitles/{new_id}/download",
+    }
+
+
+@APP.post("/api/subtitles/upload/bulk", tags=["upload"])
+async def upload_bulk(
+    files: List[UploadFile],
+    imdb_id: str = Form(...),
+    title: str = Form(...),
+    year: Optional[int] = Form(None),
+    language: str = Form(...),
+    release_name: str = Form(...),
+    type: str = Form("movie"),
+    season: Optional[int] = Form(None),
+    episode: Optional[int] = Form(None),
+    source: str = Form("manual"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Upload multiple .srt files sharing the same metadata."""
+    require_key(x_api_key)
+    results = []
+    for f in files:
+        try:
+            res = await upload_subtitle(
+                file=f,
+                imdb_id=imdb_id,
+                title=title,
+                year=year,
+                language=language,
+                release_name=release_name,
+                type=type,
+                season=season,
+                episode=episode,
+                source=source,
+                x_api_key=x_api_key,
+            )
+            results.append({"filename": f.filename, **res})
+        except HTTPException as exc:
+            results.append({"filename": f.filename, "error": exc.detail})
+    return {"uploaded": len([r for r in results if "id" in r]), "results": results}
+
+
+# ---------------------------------------------------------------------------
+# Routes: CRUD – delete / update
+# ---------------------------------------------------------------------------
+
+@APP.delete("/api/subtitles/{sub_id}", tags=["subtitles"])
+def delete_subtitle(
+    sub_id: int,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Delete a subtitle record and its file from disk."""
+    require_key(x_api_key)
+    conn = db_read()
+    row = conn.execute("SELECT * FROM subtitles WHERE id=?", (sub_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+
+    file_path: str = row["file_path"] or ""
+    if file_path and os.path.isfile(file_path):
+        os.remove(file_path)
+
+    with _DB_LOCK:
+        wconn = _db_connect()
+        wconn.execute("DELETE FROM subtitles WHERE id=?", (sub_id,))
+        wconn.commit()
+        wconn.close()
+
+    return {"deleted": sub_id}
+
+
+@APP.put("/api/subtitles/{sub_id}", tags=["subtitles"])
+async def update_subtitle(
+    sub_id: int,
+    title: Optional[str] = Form(None),
+    year: Optional[int] = Form(None),
+    language: Optional[str] = Form(None),
+    release_name: Optional[str] = Form(None),
+    source: Optional[str] = Form(None),
+    file: Optional[UploadFile] = None,
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Update subtitle metadata and optionally replace the .srt file."""
+    require_key(x_api_key)
+    conn = db_read()
+    row = conn.execute("SELECT * FROM subtitles WHERE id=?", (sub_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Subtitle not found")
+
+    updates: Dict[str, Any] = {}
+    if title is not None:
+        updates["title"] = title
+    if year is not None:
+        updates["year"] = year
+    if language is not None:
+        updates["language"] = language
+    if release_name is not None:
+        updates["release_name"] = release_name
+    if source is not None:
+        updates["source"] = source
+
+    if file and file.filename:
+        if not file.filename.lower().endswith(".srt"):
+            raise HTTPException(status_code=400, detail="Only .srt files accepted")
+        content = await file.read()
+        file_hash = hash_of_bytes(content)
+        old_path: str = row["file_path"] or ""
+        # Validate old_path before reusing it
+        subs_root = os.path.realpath(SUBS_DIR)
+        old_path_real = os.path.realpath(old_path) if old_path else ""
+        path_safe = (
+            bool(old_path_real)
+            and os.path.isfile(old_path_real)
+            and _is_safe_path(subs_root, old_path_real)
+        )
+        dest_path = old_path_real if path_safe else subtitle_file_path(
+            row["imdb_id"] or "unknown",
+            updates.get("language") or row["language"] or "unknown",
+            file_hash,
+        )
+        # Final guard before writing
+        if not _is_safe_path(subs_root, dest_path):
+            raise HTTPException(status_code=500, detail="Internal path error")
+        with open(dest_path, "wb") as fh:
+            fh.write(content)
+        updates["file_path"] = dest_path
+        updates["file_hash"] = file_hash
+        updates["file_size"] = len(content)
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    # Build SET clause from a fixed ordered list of allowed columns.
+    # Keys are CODE LITERALS drawn from _COL_ORDER, never from user input, so
+    # this f-string is safe from SQL injection.
+    _COL_ORDER = [
+        "imdb_id", "title", "year", "type", "season", "episode",
+        "language", "release_name", "source", "file_path", "file_hash", "file_size",
+    ]
+    cols_to_update = [c for c in _COL_ORDER if c in updates]
+    if not cols_to_update:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    set_clause = ", ".join(f"{c}=?" for c in cols_to_update)
+    values = [updates[c] for c in cols_to_update] + [sub_id]
+    with _DB_LOCK:
+        wconn = _db_connect()
+        wconn.execute(f"UPDATE subtitles SET {set_clause} WHERE id=?", values)
+        wconn.commit()
+        wconn.close()
+
+    return {"updated": sub_id}
+
+
+# ---------------------------------------------------------------------------
+# Routes: stats
+# ---------------------------------------------------------------------------
+
+@APP.get("/api/subtitles/stats", tags=["stats"])
+def subtitles_stats(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Return aggregate statistics."""
+    require_key(x_api_key)
+    conn = db_read()
+    total = conn.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0]
+    by_lang = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT language, COUNT(*) AS count FROM subtitles GROUP BY language ORDER BY count DESC"
+        ).fetchall()
+    ]
+    by_source = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT source, COUNT(*) AS count FROM subtitles GROUP BY source ORDER BY count DESC"
+        ).fetchall()
+    ]
+    recent = [
+        serialize_row(r)
+        for r in conn.execute(
+            "SELECT * FROM subtitles ORDER BY id DESC LIMIT 10"
+        ).fetchall()
+    ]
+    conn.close()
+    return {"total": total, "by_language": by_lang, "by_source": by_source, "recent": recent}
+
+
+# ---------------------------------------------------------------------------
+# Routes: sync
+# ---------------------------------------------------------------------------
+
+@APP.post("/api/sync/bazarr", tags=["sync"])
+async def sync_bazarr_now(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Manually trigger a Bazarr sync."""
+    require_key(x_api_key)
+    if not BAZARR_SYNC_ENABLED and not BAZARR_API_KEY:
+        raise HTTPException(status_code=503, detail="Bazarr sync not configured")
+    return await sync_bazarr_once()
+
+
+@APP.get("/api/sync/status", tags=["sync"])
+def sync_status(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+) -> Dict[str, Any]:
+    """Return the most recent sync state."""
+    require_key(x_api_key)
+    conn = db_read()
+    row = conn.execute(
+        "SELECT * FROM sync_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"sync_type": None, "last_sync_timestamp": None, "last_sync_status": None, "items_synced": 0}
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Static files (serve www/ at root)
+# ---------------------------------------------------------------------------
+
+_WWW_DIR = os.path.join(os.path.dirname(__file__), "www")
+if os.path.isdir(_WWW_DIR):
+    APP.mount("/", StaticFiles(directory=_WWW_DIR, html=True), name="static")

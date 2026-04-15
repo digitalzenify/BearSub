@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BAZARR_ROOT="/opt/bazarr"
-PROVIDER_DST="$BAZARR_ROOT/custom_libs/subliminal_patch/providers/subsdump.py"
+PROVIDER_DST="$BAZARR_ROOT/custom_libs/subliminal_patch/providers/bearsub.py"
 
 restore_latest_backup() {
     local target="$1"
@@ -27,7 +27,7 @@ restore_latest_backup() {
 
 echo
 echo "========================================"
-echo "   SubsDump Bazarr Provider Uninstaller"
+echo "   BearSub Bazarr Provider Uninstaller"
 echo "========================================"
 echo
 
@@ -48,22 +48,22 @@ echo
 echo "Step 2: Restoring Bazarr Python files from latest backups"
 restore_latest_backup \
     "$BAZARR_ROOT/bazarr/app/config.py" \
-    "config.py.bak.subsdump.*"
+    "config.py.bak.bearsub.*"
 
 restore_latest_backup \
     "$BAZARR_ROOT/bazarr/app/get_providers.py" \
-    "get_providers.py.bak.subsdump.*"
+    "get_providers.py.bak.bearsub.*"
 
 restore_latest_backup \
     "$BAZARR_ROOT/custom_libs/subliminal_patch/providers/__init__.py" \
-    "__init__.py.bak.subsdump.*"
+    "__init__.py.bak.bearsub.*"
 echo
 
 echo "Step 3: Restoring Bazarr frontend assets from latest backups"
 find "$BAZARR_ROOT/frontend/build/assets" -maxdepth 1 -type f -name 'index-*.js' | while read -r js; do
     base="$(basename "$js")"
     dir="$(dirname "$js")"
-    latest="$(find "$dir" -maxdepth 1 -type f -name "${base}.bak.subsdump.*" | sort | tail -n 1 || true)"
+    latest="$(find "$dir" -maxdepth 1 -type f -name "${base}.bak.bearsub.*" | sort | tail -n 1 || true)"
 
     if [[ -n "$latest" && -f "$latest" ]]; then
         cp -f "$latest" "$js"
@@ -85,6 +85,6 @@ systemctl status bazarr --no-pager
 echo
 
 echo "========================================"
-echo " SubsDump provider uninstall complete"
+echo " BearSub provider uninstall complete"
 echo "========================================"
 echo
